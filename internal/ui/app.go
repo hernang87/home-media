@@ -37,6 +37,7 @@ type App struct {
 	libraryTab *container.TabItem
 	remoteTab  *container.TabItem
 	logsTab    *container.TabItem
+	phoneTab   *container.TabItem
 	libStack   []fyne.CanvasObject // navigation stack of the Library tab; [0] is the grid
 	libHolder  *fyne.Container
 
@@ -53,7 +54,14 @@ func NewApp(a fyne.App, w fyne.Window, c *client.Client) *App {
 	app.libraryTab = container.NewTabItem("Library", app.libHolder)
 	app.remoteTab = container.NewTabItem("Remote", NewRemote(app))
 	app.logsTab = container.NewTabItem("Logs", NewLogs(app))
-	app.tabs = container.NewAppTabs(app.libraryTab, app.remoteTab, app.logsTab)
+	phone := NewPhone(app)
+	app.phoneTab = container.NewTabItem("Phone", phone.Object())
+	app.tabs = container.NewAppTabs(app.libraryTab, app.remoteTab, app.phoneTab, app.logsTab)
+	app.tabs.OnSelected = func(t *container.TabItem) {
+		if t == app.phoneTab {
+			phone.load()
+		}
+	}
 
 	app.deviceSel = widget.NewSelect(nil, func(name string) {
 		if d, ok := app.deviceByName(name); ok {
