@@ -1,0 +1,5 @@
+.env
+/data/
+/bin/
+/testdata/fixtures/
+.DS_Store

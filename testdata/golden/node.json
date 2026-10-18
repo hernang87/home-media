@@ -1,0 +1,264 @@
+{
+  "parseMediaPath": [
+    {
+      "in": "Movie.Name.2019.1080p.BluRay.x264/Movie.Name.2019.1080p.BluRay.x264.mkv",
+      "out": {
+        "type": "movie",
+        "title": "Movie Name",
+        "year": 2019
+      }
+    },
+    {
+      "in": "2012 (2009)/2012.mkv",
+      "out": {
+        "type": "movie",
+        "title": "2012",
+        "year": 2012
+      }
+    },
+    {
+      "in": "1917.2019.mkv",
+      "out": {
+        "type": "movie",
+        "title": "1917",
+        "year": 2019
+      }
+    },
+    {
+      "in": "The Movie (1999)/movie.mp4",
+      "out": {
+        "type": "movie",
+        "title": "The Movie",
+        "year": 1999
+      }
+    },
+    {
+      "in": "Show Name/Season 1/Show.Name.S01E02.720p.mkv",
+      "out": {
+        "type": "episode",
+        "show": "Show Name",
+        "showYear": null,
+        "season": 1,
+        "episode": 2
+      }
+    },
+    {
+      "in": "Show/s02e10.mkv",
+      "out": {
+        "type": "episode",
+        "show": "Show",
+        "showYear": null,
+        "season": 2,
+        "episode": 10
+      }
+    },
+    {
+      "in": "Show Name/Season 03/3x05.mp4",
+      "out": {
+        "type": "episode",
+        "show": "Show Name",
+        "showYear": null,
+        "season": 3,
+        "episode": 5
+      }
+    },
+    {
+      "in": "Series.S01E01E02.mkv",
+      "out": {
+        "type": "episode",
+        "show": "Series",
+        "showYear": null,
+        "season": 1,
+        "episode": 1
+      }
+    },
+    {
+      "in": "Some Movie [YTS]/Some.Movie.mp4",
+      "out": {
+        "type": "movie",
+        "title": "Some Movie",
+        "year": null
+      }
+    },
+    {
+      "in": "plain.mkv",
+      "out": {
+        "type": "movie",
+        "title": "plain",
+        "year": null
+      }
+    },
+    {
+      "in": "The.Matrix.1999.REMUX.2160p.mkv",
+      "out": {
+        "type": "movie",
+        "title": "The Matrix",
+        "year": 1999
+      }
+    }
+  ],
+  "cleanTitle": [
+    {
+      "in": "The.Movie.2026.1080p.WEB-DL",
+      "out": {
+        "title": "The Movie",
+        "year": 2026
+      }
+    },
+    {
+      "in": "2012",
+      "out": {
+        "title": "2012",
+        "year": 2012
+      }
+    },
+    {
+      "in": "[Group] Name (2020) [1080p]",
+      "out": {
+        "title": "Name",
+        "year": 2020
+      }
+    },
+    {
+      "in": "name_with_underscores_2001",
+      "out": {
+        "title": "name with underscores",
+        "year": 2001
+      }
+    },
+    {
+      "in": "Name 1080p x264",
+      "out": {
+        "title": "Name",
+        "year": null
+      }
+    }
+  ],
+  "describeSubFile": [
+    {
+      "in": "spa.srt",
+      "out": {
+        "lang": "spa",
+        "sdh": false,
+        "forced": false
+      }
+    },
+    {
+      "in": "SDH.eng.HI.srt",
+      "out": {
+        "lang": "eng",
+        "sdh": true,
+        "forced": false
+      }
+    },
+    {
+      "in": "English.srt",
+      "out": {
+        "lang": "en",
+        "sdh": false,
+        "forced": false
+      }
+    },
+    {
+      "in": "movie.es.forced.srt",
+      "out": {
+        "lang": "es",
+        "sdh": false,
+        "forced": true
+      }
+    },
+    {
+      "in": "movie.srt",
+      "out": {
+        "lang": "",
+        "sdh": false,
+        "forced": false
+      }
+    },
+    {
+      "in": "fre.srt",
+      "out": {
+        "lang": "fra",
+        "sdh": false,
+        "forced": false
+      }
+    },
+    {
+      "in": "Español.srt",
+      "out": {
+        "lang": "",
+        "sdh": false,
+        "forced": false
+      }
+    }
+  ],
+  "subLabel": [
+    {
+      "in": {
+        "lang": "eng"
+      },
+      "out": "English"
+    },
+    {
+      "in": {
+        "lang": "spa",
+        "title": "Latin",
+        "sdh": true
+      },
+      "out": "Spanish (Latin, SDH)"
+    },
+    {
+      "in": {
+        "lang": "ice",
+        "forced": true
+      },
+      "out": "Icelandic (Forced)"
+    },
+    {
+      "in": {
+        "title": "Commentary"
+      },
+      "out": "Commentary"
+    },
+    {
+      "in": {},
+      "out": "Unknown"
+    }
+  ],
+  "languageName": [
+    {
+      "in": "eng",
+      "out": "English"
+    },
+    {
+      "in": "spa",
+      "out": "Spanish"
+    },
+    {
+      "in": "ger",
+      "out": "German"
+    },
+    {
+      "in": "fre",
+      "out": "French"
+    },
+    {
+      "in": "chi",
+      "out": "Chinese"
+    },
+    {
+      "in": "xx",
+      "out": "xx"
+    },
+    {
+      "in": "",
+      "out": ""
+    }
+  ],
+  "srtToVtt": [
+    {
+      "in": "1\r\n00:00:01,000 --> 00:00:02,500\r\n<font color=\"red\">Hola</font> {\\an8}mundo\r\n\r\n2\r\n00:01:02,003 --> 00:01:03,000\r\nBye\r\n",
+      "out": "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.500\nHola mundo\n\n2\n00:01:02.003 --> 00:01:03.000\nBye\n"
+    }
+  ]
+}
