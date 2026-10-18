@@ -49,7 +49,12 @@ func TestAdvertiseThenBrowse(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("test-server not found among %+v", found)
+	all, _ := net.Interfaces()
+	for _, i := range all {
+		addrs, _ := i.Addrs()
+		t.Logf("iface %s flags=%v addrs=%v", i.Name, i.Flags, addrs)
+	}
+	t.Fatalf("test-server not found among %+v (using %s)", found, lo[0].Name)
 }
 
 func TestServerFromEntry(t *testing.T) {
