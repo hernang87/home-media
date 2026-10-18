@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"homemedia/internal/model"
 )
@@ -187,4 +188,22 @@ func channelLayout(n int) string {
 		return "7.1"
 	}
 	return fmt.Sprintf("%d ch", n)
+}
+
+// LogLine is one log entry as shown in the Logs tab: "15:04:05 WARN message".
+func LogLine(t time.Time, level, msg string) string {
+	return fmt.Sprintf("%s %-5s %s", t.Local().Format("15:04:05"), level, msg)
+}
+
+// LevelRank orders slog level names so the Logs tab can filter by severity.
+func LevelRank(level string) int {
+	switch {
+	case strings.HasPrefix(level, "ERROR"):
+		return 3
+	case strings.HasPrefix(level, "WARN"):
+		return 2
+	case strings.HasPrefix(level, "INFO"):
+		return 1
+	}
+	return 0 // DEBUG and anything unknown
 }

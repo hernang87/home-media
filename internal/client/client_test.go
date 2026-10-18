@@ -370,3 +370,15 @@ func TestNewTrimsTrailingSlash(t *testing.T) {
 		t.Errorf("Base = %q, want %q", got, "http://host:9000")
 	}
 }
+
+func TestLogs(t *testing.T) {
+	srv, last := recordingServer(t, 200, `{"entries":[{"seq":4,"time":"2026-10-17T10:00:00Z","level":"INFO","msg":"hi"}],"last":4}`)
+	c := New(srv.URL)
+	entries, newest, err := c.Logs(context.Background(), 3)
+	if err != nil || newest != 4 || len(entries) != 1 || entries[0].Msg != "hi" {
+		t.Fatalf("got %+v %d %v", entries, newest, err)
+	}
+	if r := last(); r.escapedPath != "/api/logs" || r.query != "after=3" {
+		t.Errorf("request = %+v", r)
+	}
+}

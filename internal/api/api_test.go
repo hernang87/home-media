@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +16,7 @@ import (
 	"time"
 
 	"homemedia/internal/config"
+	"homemedia/internal/logbuf"
 	"homemedia/internal/model"
 	"homemedia/internal/transcode"
 )
@@ -372,5 +376,29 @@ func TestExtraRoutesMounted(t *testing.T) {
 	h.ServeHTTP(rec, request("GET", "/cast/ping", ""))
 	if rec.Code != http.StatusTeapot {
 		t.Fatalf("extra route status = %d, want 418", rec.Code)
+	}
+}
+
+func TestLogsEndpoint(t *testing.T) {
+	buf := logbuf.New(10)
+	slog.New(buf.Handler(slog.NewTextHandler(io.Discard, nil))).Info("hello", "k", "v")
+	h := New(Deps{Config: &config.Config{}, Logs: buf})
+	for _, tc := range []struct {
+		url  string
+		want int
+	}{{"/api/logs", 1}, {"/api/logs?after=1", 0}} {
+		req := httptest.NewRequest("GET", tc.url, nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var out struct {
+			Entries []logbuf.Entry `json:"entries"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.Entries) != tc.want {
+			t.Fatalf("%s: %v %s", tc.url, err, rec.Body.String())
+		}
+		if tc.want == 1 && out.Entries[0].Msg != "hello k=v" {
+			t.Errorf("entry = %+v", out.Entries[0])
+		}
 	}
 }

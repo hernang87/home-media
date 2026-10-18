@@ -36,6 +36,7 @@ type App struct {
 	tabs       *container.AppTabs
 	libraryTab *container.TabItem
 	remoteTab  *container.TabItem
+	logsTab    *container.TabItem
 	libStack   []fyne.CanvasObject // navigation stack of the Library tab; [0] is the grid
 	libHolder  *fyne.Container
 
@@ -51,7 +52,8 @@ func NewApp(a fyne.App, w fyne.Window, c *client.Client) *App {
 	app.libHolder = container.NewStack()
 	app.libraryTab = container.NewTabItem("Library", app.libHolder)
 	app.remoteTab = container.NewTabItem("Remote", NewRemote(app))
-	app.tabs = container.NewAppTabs(app.libraryTab, app.remoteTab)
+	app.logsTab = container.NewTabItem("Logs", NewLogs(app))
+	app.tabs = container.NewAppTabs(app.libraryTab, app.remoteTab, app.logsTab)
 
 	app.deviceSel = widget.NewSelect(nil, func(name string) {
 		if d, ok := app.deviceByName(name); ok {
@@ -110,22 +112,27 @@ func (a *App) Show(key string) (model.PublicShow, bool) {
 
 // Reload fetches the library in the background and notifies listeners.
 func (a *App) Reload() {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		snap, err := a.Client.Library(ctx)
-		if err != nil {
-			return // the next tick retries; a flaky LAN should not pop dialogs
+	go func() { _ = a.ReloadSync() }()
+}
+
+// ReloadSync is Reload that waits: it returns once the new snapshot is stored and
+// the reload hooks are queued on the UI thread. Call it from a goroutine.
+func (a *App) ReloadSync() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	snap, err := a.Client.Library(ctx)
+	if err != nil {
+		return err // the next tick retries; a flaky LAN should not pop dialogs
+	}
+	a.mu.Lock()
+	a.snap = snap
+	a.mu.Unlock()
+	fyne.Do(func() {
+		for _, fn := range a.onReload {
+			fn()
 		}
-		a.mu.Lock()
-		a.snap = snap
-		a.mu.Unlock()
-		fyne.Do(func() {
-			for _, fn := range a.onReload {
-				fn()
-			}
-		})
-	}()
+	})
+	return nil
 }
 
 // ReloadDevices refreshes the TV list and keeps the remembered choice selected.

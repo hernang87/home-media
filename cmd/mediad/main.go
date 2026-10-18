@@ -17,6 +17,7 @@ import (
 	"homemedia/internal/config"
 	"homemedia/internal/discovery"
 	"homemedia/internal/library"
+	"homemedia/internal/logbuf"
 	"homemedia/internal/metadata"
 	"homemedia/internal/transcode"
 )
@@ -24,13 +25,31 @@ import (
 const version = "0.1.0"
 
 func main() {
-	if err := run(); err != nil {
+	logs := logbuf.New(2000)
+	// Not slog.Default().Handler(): after SetDefault that would log into itself.
+	slog.SetDefault(slog.New(logs.Handler(slog.NewTextHandler(os.Stderr, nil))))
+	cmd := ""
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
+	}
+	var err error
+	switch cmd {
+	case "doctor":
+		err = runDoctor(os.Stdout)
+	case "install":
+		err = runInstall(os.Stdout)
+	case "uninstall":
+		err = runUninstall(os.Stdout)
+	default: // anything else is the media dir
+		err = run(logs)
+	}
+	if err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logs *logbuf.Buffer) error {
 	arg := ""
 	if len(os.Args) > 1 {
 		arg = os.Args[1]
@@ -64,6 +83,7 @@ func run() error {
 		Config: cfg, Lib: lib, TX: tx,
 		Info:  api.Info{Name: cfg.ServerName, LAN: lan, Port: cfg.Port, Base: base, TMDB: meta.Enabled(), Version: version},
 		Extra: caster.Routes,
+		Logs:  logs,
 	})
 	srv := &http.Server{Addr: fmt.Sprintf("0.0.0.0:%d", cfg.Port), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 

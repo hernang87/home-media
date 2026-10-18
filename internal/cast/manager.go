@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +165,10 @@ func deviceFromEntry(e *zeroconf.ServiceEntry) (Device, bool) {
 		}
 	}
 	if addr == "" || txt["id"] == "" {
+		return Device{}, false
+	}
+	// "ca" is a capability bitmask; bit 0 is video out. Speakers lack it.
+	if ca, err := strconv.Atoi(txt["ca"]); err == nil && ca&1 == 0 {
 		return Device{}, false
 	}
 	name := txt["fn"]

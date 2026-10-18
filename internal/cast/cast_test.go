@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/grandcat/zeroconf"
 
 	"homemedia/internal/model"
 )
@@ -269,5 +272,26 @@ func TestStopSavesPosition(t *testing.T) {
 	got, ok := lib.lastSaved()
 	if !ok || got[0] != "abc123" || got[1].(float64) < 45 {
 		t.Fatalf("stop did not save the position, got %v (saved=%v)", got, ok)
+	}
+}
+
+func TestDeviceFromEntrySkipsAudioOnly(t *testing.T) {
+	entry := func(ca string) *zeroconf.ServiceEntry {
+		e := zeroconf.NewServiceEntry("x", "_googlecast._tcp", "local.")
+		e.AddrIPv4 = []net.IP{net.ParseIP("192.168.1.20")}
+		e.Port = 8009
+		e.Text = []string{"id=abc", "fn=Thing", "md=Chromecast"}
+		if ca != "" {
+			e.Text = append(e.Text, "ca="+ca)
+		}
+		return e
+	}
+	for _, tc := range []struct {
+		ca   string
+		want bool
+	}{{"", true}, {"5", true}, {"199173", true}, {"4", false}, {"2052", false}} {
+		if _, ok := deviceFromEntry(entry(tc.ca)); ok != tc.want {
+			t.Errorf("ca=%q: shown=%v, want %v", tc.ca, ok, tc.want)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"homemedia/internal/logbuf"
 	"homemedia/internal/model"
 	"homemedia/internal/subs"
 	"homemedia/internal/transcode"
@@ -46,6 +47,7 @@ func newMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /api/status", h.status)
 	mux.HandleFunc("POST /api/scan", h.scan)
 	mux.HandleFunc("POST /api/progress", h.progress)
+	mux.HandleFunc("GET /api/logs", h.logs)
 	mux.HandleFunc("GET /art/{id}/{kind}", h.art)
 	mux.HandleFunc("GET /file/{id}", h.file)
 	mux.HandleFunc("GET /hls/{id}/{audio}/index.m3u8", h.playlist)
@@ -294,4 +296,16 @@ func (h *handlers) subtitle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	writeText(w, http.StatusOK, vtt)
+}
+
+// logs returns the recent server log entries newer than ?after=<seq>.
+func (h *handlers) logs(w http.ResponseWriter, r *http.Request) {
+	entries, last := []logbuf.Entry{}, 0
+	if h.d.Logs != nil {
+		after, _ := strconv.Atoi(r.URL.Query().Get("after"))
+		entries = append(entries, h.d.Logs.After(after)...)
+		last = h.d.Logs.Last()
+	}
+	// last lets a client notice a server restart (the sequence starts over).
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "last": last})
 }

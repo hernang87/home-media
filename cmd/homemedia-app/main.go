@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"os"
 	"strings"
@@ -21,8 +22,12 @@ import (
 
 const prefServer = "server"
 
+//go:embed icon.png
+var iconPNG []byte
+
 func main() {
 	a := app.NewWithID("com.homemedia.app")
+	a.SetIcon(fyne.NewStaticResource("icon.png", iconPNG))
 	w := a.NewWindow("HomeMedia")
 	w.Resize(fyne.NewSize(1000, 720))
 

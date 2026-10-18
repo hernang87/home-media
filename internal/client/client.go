@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,6 +172,25 @@ func (c *Client) Devices(ctx context.Context) ([]Device, error) {
 	var out []Device
 	err := c.call(ctx, timeoutStd, http.MethodGet, "/api/cast/devices", nil, &out)
 	return out, err
+}
+
+// LogEntry is one server log line.
+type LogEntry struct {
+	Seq   int       `json:"seq"`
+	Time  time.Time `json:"time"`
+	Level string    `json:"level"`
+	Msg   string    `json:"msg"`
+}
+
+// Logs returns the server log entries with Seq greater than after, and the
+// newest Seq on the server. A last below after means the server restarted.
+func (c *Client) Logs(ctx context.Context, after int) (entries []LogEntry, last int, err error) {
+	var out struct {
+		Entries []LogEntry `json:"entries"`
+		Last    int        `json:"last"`
+	}
+	err = c.call(ctx, timeoutShort, http.MethodGet, "/api/logs?after="+strconv.Itoa(after), nil, &out)
+	return out.Entries, out.Last, err
 }
 
 // Status uses a short (3 s) timeout; it is polled once a second.

@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"homemedia/internal/config"
+	"homemedia/internal/logbuf"
 	"homemedia/internal/model"
 )
 
@@ -42,6 +43,7 @@ type Deps struct {
 	TX     Transcoder
 	Info   Info
 	Extra  func(mux *http.ServeMux)
+	Logs   *logbuf.Buffer // optional; served at GET /api/logs
 }
 
 // New returns the full handler: routes + CORS + LAN-only filter + request logging.

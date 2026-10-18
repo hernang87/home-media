@@ -1,0 +1,59 @@
+# AGENTS.md
+
+Guide for AI coding agents working in this repo.
+
+## What this is
+
+Go media server (module `homemedia`), no web UI.
+
+- `cmd/mediad`: daemon. Scans `MEDIA_DIR`, serves direct play and HLS transcode (ffmpeg), converts subtitles to WebVTT, casts to Chromecast. The CASTv2 client is hand-rolled in `internal/cast` and uses the stock Default Media Receiver.
+- `cmd/homemedia-app`: Fyne macOS desktop client. Talks to mediad over HTTP via `internal/client`.
+
+## Layout
+
+- `internal/model`: types shared across packages
+- `internal/config`: settings from flags, env and `.env`
+- `internal/parse`: release-style file names to library metadata
+- `internal/probe`: ffprobe wrapper; decides what a Chromecast can play
+- `internal/subs`: subtitle track names, conversion to WebVTT
+- `internal/metadata`: TMDB client and artwork cache
+- `internal/library`: folder scan, item cache, watch state, file watching
+- `internal/transcode`: on-demand HLS segments via ffmpeg
+- `internal/api`: HTTP API and media files (`GET /api/logs?after=<seq>` serves the log ring)
+- `internal/logbuf`: in-memory slog ring buffer behind the app's Logs tab
+- `internal/cast`: Chromecast discovery and CASTv2 playback
+- `internal/discovery`: mDNS advertise and browse
+- `internal/client`: typed HTTP client for mediad
+- `internal/ui`: Fyne desktop views
+- `internal/ui/vm`: pure view logic, testable without a window
+
+## Commands
+
+```sh
+go build -o bin/mediad ./cmd/mediad
+go build -o bin/homemedia-app ./cmd/homemedia-app   # needs cgo (Fyne)
+go build ./... && go vet ./... && go test ./...
+bin/mediad    # run from repo root: reads ./.env, writes ./data
+```
+
+- `bin/mediad doctor` checks setup; `bin/mediad install` / `uninstall` manage the launchd agent `com.homemedia.mediad` (run install from the repo root; logs go to `~/Library/Logs/homemedia/mediad.log`).
+- `bash scripts/package-app.sh` builds `bin/HomeMedia.app`; `go run ./cmd/genicon cmd/homemedia-app/icon.png` regenerates the icon.
+- `ffmpeg` and `ffprobe` must be on PATH (here: `/opt/homebrew/bin`).
+
+## Conventions
+
+- HTTP routes use stdlib `net/http` mux patterns.
+- Logging uses `log/slog`.
+- Run `gofmt`. Prefer table-driven tests.
+- Put pure logic in `internal/ui/vm` so it can be tested without a window.
+- Fyne widgets are touched only on the UI thread. From goroutines, use `fyne.Do`.
+
+## Gotchas
+
+- Resume protocol: `POST /api/cast/{device}/play` returns 409 with `{"code":"resume",...}` when saved progress is >= 30 s. The client retries with `"resume":"continue"` or `"resume":"restart"`.
+- Progress is saved every 10 s and on pause, stop and finish.
+- Without `TMDB_API_KEY`, posters are null and the app falls back to the backdrop.
+- Device names in URLs must be percent-encoded, or use the device ID.
+- Do not wrap `slog.Default().Handler()` in a handler passed to `slog.SetDefault` (it recurses); build a fresh handler.
+- Audio-only Cast devices (mDNS `ca` bit 0 unset) are hidden.
+- Never commit `.env`, `data/` or `bin/`.

@@ -2,6 +2,7 @@ package vm
 
 import (
 	"testing"
+	"time"
 
 	"homemedia/internal/model"
 )
@@ -122,5 +123,18 @@ func TestArtFor(t *testing.T) {
 	}
 	if got := ArtFor(nil, nil); got != nil {
 		t.Error("no art should stay nil")
+	}
+}
+
+func TestLogLineAndRank(t *testing.T) {
+	ts := time.Date(2026, 10, 17, 15, 4, 5, 0, time.Local)
+	if got := LogLine(ts, "WARN", "tv gone"); got != "15:04:05 WARN  tv gone" {
+		t.Errorf("LogLine = %q", got)
+	}
+	if !(LevelRank("ERROR") > LevelRank("WARN") && LevelRank("WARN") > LevelRank("INFO") && LevelRank("INFO") > LevelRank("DEBUG")) {
+		t.Error("level ranks out of order")
+	}
+	if LevelRank("INFO+2") != 1 || LevelRank("???") != 0 {
+		t.Error("offset and unknown levels")
 	}
 }

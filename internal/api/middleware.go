@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 )
 
 // maxBody is the request body limit for POST requests.
@@ -50,7 +51,11 @@ func requestLog(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		slog.Debug("http request",
+		level := slog.LevelDebug
+		if p := r.URL.Path; strings.HasPrefix(p, "/file/") || strings.HasPrefix(p, "/sub/") || strings.HasSuffix(p, "/index.m3u8") {
+			level = slog.LevelInfo // what the TV fetches is worth seeing in the log view
+		}
+		slog.Log(r.Context(), level, "http request",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
 			"path", r.URL.Path,

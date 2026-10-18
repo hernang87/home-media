@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"homemedia/internal/model"
 	"homemedia/internal/ui/vm"
 )
 
@@ -76,11 +77,7 @@ func movieBody(a *App, key string) fyne.CanvasObject {
 	subSel.OnChanged = func(string) { subID = choices[subSel.SelectedIndex()].ID }
 	items = append(items, container.NewBorder(nil, nil, widget.NewLabel("Subtitles"), nil, subSel))
 
-	playLabel := "Play"
-	if vm.Resumable(it) {
-		playLabel = "Resume"
-	}
-	play := widget.NewButton(playLabel, func() { a.PlayItem(it, audioIdx, subID) })
+	play := widget.NewButton(playLabel(it), func() { a.PlayItem(it, audioIdx, subID) })
 
 	watched := it.Progress != nil && it.Progress.Watched
 	var mark *widget.Button
@@ -223,6 +220,14 @@ func smallLabel(text string) *widget.Label {
 	l := widget.NewLabel(text)
 	l.SizeName = theme.SizeNameCaptionText
 	return l
+}
+
+// playLabel is "Resume" when the item has a saved position worth resuming.
+func playLabel(it model.PublicItem) string {
+	if vm.Resumable(it) {
+		return "Resume"
+	}
+	return "Play"
 }
 
 func markLabel(watched bool) string {
