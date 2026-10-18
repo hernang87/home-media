@@ -165,6 +165,15 @@ let remoteRefs = null; // nodes updated on each poll (only while the playing vie
 
 const isPlayingState = (s) => s.state === "PLAYING" || s.state === "BUFFERING";
 
+// nextEpisode is the episode after it in its show (episodes are ordered by season, then episode), or null.
+function nextEpisode(it) {
+  if (!it || !it.show) return null;
+  const show = state.shows.find((s) => s.episodes.includes(it.id));
+  if (!show) return null;
+  const next = state.items.get(show.episodes[show.episodes.indexOf(it.id) + 1]);
+  return next || null;
+}
+
 function seekBy(delta) {
   const s = state.status;
   if (s) control("seek", Math.max(0, s.position + delta));
@@ -215,6 +224,7 @@ function buildRemote(key, it, dev) {
   setSeeking(false);
   const audio = it ? it.audio : [];
   const subs = it ? it.subs : [];
+  const next = nextEpisode(it);
   const r = {};
   r.art = h("div", { class: "art" });
   r.artCss = null;
@@ -267,7 +277,10 @@ function buildRemote(key, it, dev) {
       ),
       r.audio && h("div", { class: "row" }, h("label", null, "Audio"), r.audio),
       r.sub && h("div", { class: "row" }, h("label", null, "Subs"), r.sub),
-      h("div", { class: "btns" }, h("button", { class: "btn danger", onclick: () => control("stop") }, "Stop")),
+      h("div", { class: "btns" },
+        next && h("button", { class: "btn", onclick: () => play(next, defaultTracks(next)) }, "Next episode"),
+        h("button", { class: "btn danger", onclick: () => control("stop") }, "Stop"),
+      ),
     ),
   );
   remoteKey = key;
