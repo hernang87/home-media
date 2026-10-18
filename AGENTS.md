@@ -63,4 +63,5 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 - Settings writes (`POST /api/settings`) are accepted only from loopback or mediad's own addresses. `GET /api/settings` never returns the TMDB key, only `tmdbKeySet`.
 - `.env` is rewritten by `config.UpdateEnvFile` (atomic, mode 0600). It replaces the first occurrence of a key, because `parseDotEnv` is first-wins. Real env vars still override `.env`, and `daemon.Start` always sets `PORT`.
 - TMDB client credentials change at runtime. Use `SetCredentials` and `Credentials`; never assign `APIKey` or `Language` after construction.
+- `homemedia-app` has a menu bar item (Open HomeMedia, Quit). The window close button only hides the window; Quit (or Cmd-Q) exits and stops an app-owned `mediad`.
 - Never commit `.env`, `data/` or `bin/`.

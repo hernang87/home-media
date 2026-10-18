@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 
 	"homemedia/internal/client"
@@ -50,14 +51,25 @@ var iconPNG []byte
 
 func main() {
 	a := app.NewWithID("com.homemedia.app")
-	a.SetIcon(fyne.NewStaticResource("icon.png", iconPNG))
+	icon := fyne.NewStaticResource("icon.png", iconPNG)
+	a.SetIcon(icon)
 	w := a.NewWindow("HomeMedia")
 	w.Resize(fyne.NewSize(1000, 720))
+
+	// The close button hides the window; the menu bar item brings it back and
+	// offers Quit (Fyne appends it), which is what stops an app-owned mediad.
+	if da, ok := a.(desktop.App); ok {
+		da.SetSystemTrayIcon(icon)
+		da.SetSystemTrayMenu(fyne.NewMenu("HomeMedia",
+			fyne.NewMenuItem("Open HomeMedia", func() { w.Show(); w.RequestFocus() }),
+		))
+		w.SetCloseIntercept(w.Hide)
+	}
 
 	status := widget.NewLabel("Looking for your media server…")
 	w.SetContent(container.NewCenter(container.NewVBox(widget.NewProgressBarInfinite(), status)))
 
-	// Cmd-Q and the window close button end up in OnStopped; Ctrl-C and SIGTERM
+	// Cmd-Q and the tray's Quit end up in OnStopped; Ctrl-C and SIGTERM
 	// bypass it. A hard kill is covered by mediad watching its parent.
 	a.Lifecycle().SetOnStopped(stopOwned)
 	sig := make(chan os.Signal, 1)
