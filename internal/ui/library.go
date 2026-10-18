@@ -170,7 +170,7 @@ func NewLibrary(a *App) fyne.CanvasObject {
 
 	search := widget.NewEntry()
 	search.SetPlaceHolder("Search movies and shows")
-	search.OnChanged = func(q string) { query = q; rebuild() }
+	search.OnChanged = func(q string) { query = q; rebuild(); grid.ScrollToTop() }
 
 	a.OnReload(rebuild)
 	rebuild()

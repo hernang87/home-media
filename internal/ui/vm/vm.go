@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"homemedia/internal/model"
 )
@@ -59,11 +60,26 @@ type Shelf struct {
 	Episodes int
 }
 
+// fold lowercases s and drops everything but letters and digits, so "Spider-Man",
+// "Spider Man" and "spider.man" compare equal.
+func fold(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// Searching reports whether a search query is active (not blank or punctuation only).
+func Searching(query string) bool { return fold(query) != "" }
+
 // Shelves lists movies and shows as poster tiles, newest first, optionally
-// filtered by a case-insensitive title query.
+// filtered by a title query that ignores case, spaces and punctuation.
 func Shelves(snap model.Snapshot, query string) []Shelf {
-	q := strings.ToLower(strings.TrimSpace(query))
-	match := func(title string) bool { return q == "" || strings.Contains(strings.ToLower(title), q) }
+	q := fold(query)
+	match := func(title string) bool { return q == "" || strings.Contains(fold(title), q) }
 	var out []Shelf
 	for _, it := range snap.Items {
 		if it.Type != model.TypeMovie || !match(it.Title) {

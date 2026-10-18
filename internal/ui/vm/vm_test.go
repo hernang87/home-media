@@ -138,3 +138,31 @@ func TestLogLineAndRank(t *testing.T) {
 		t.Error("offset and unknown levels")
 	}
 }
+
+func TestShelvesQueryIgnoresPunctuation(t *testing.T) {
+	snap := model.Snapshot{Items: []model.PublicItem{
+		{ID: "a", Type: model.TypeMovie, Title: "Spider-Man Brand New Day"},
+		{ID: "b", Type: model.TypeMovie, Title: "Spider Man 2"},
+		{ID: "c", Type: model.TypeMovie, Title: "Spiderman"},
+		{ID: "d", Type: model.TypeMovie, Title: "The Invite"},
+	}}
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"spider-man", 3}, {"Spider Man", 3}, {"spider.man", 3}, {"  spiderman ", 3},
+		{"man 2", 1}, {"invite", 1}, {"-", 4}, {"", 4}, {"zzz", 0},
+	} {
+		if got := Shelves(snap, tc.query); len(got) != tc.want {
+			t.Errorf("Shelves(%q) = %d tiles, want %d", tc.query, len(got), tc.want)
+		}
+	}
+}
+
+func TestSearching(t *testing.T) {
+	for q, want := range map[string]bool{"": false, "  ": false, "-": false, "a": true, " Spider-Man ": true} {
+		if got := Searching(q); got != want {
+			t.Errorf("Searching(%q) = %v, want %v", q, got, want)
+		}
+	}
+}
