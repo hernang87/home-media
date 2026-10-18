@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Builds bin/HomeMedia.app from scratch: binary, Info.plist, icon and ad-hoc signature.
+#
+#   bash scripts/package-app.sh            local build; remembers this repo as mediad's working dir
+#   bash scripts/package-app.sh --release  portable build; mediad keeps .env and data/ in
+#                                          ~/Library/Application Support/HomeMedia
 set -euo pipefail
+
+RELEASE=0
+[ "${1:-}" = "--release" ] && RELEASE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -18,7 +25,9 @@ go build -ldflags="-extldflags=-Wl,-no_warn_duplicate_libraries" -o "$CONTENTS/M
 echo "Building mediad (the app starts it and stops it on quit)..."
 go build -o "$CONTENTS/MacOS/mediad" ./cmd/mediad
 # Where mediad reads .env and keeps data/ (see internal/daemon).
-printf '%s\n' "$ROOT" > "$CONTENTS/Resources/workdir"
+if [ "$RELEASE" = 0 ]; then
+	printf '%s\n' "$ROOT" > "$CONTENTS/Resources/workdir"
+fi
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

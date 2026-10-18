@@ -63,14 +63,54 @@ func TestFind(t *testing.T) {
 		}
 	})
 
-	t.Run("errors", func(t *testing.T) {
+	t.Run("support dir fallback", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
 		dir := t.TempDir()
-		if _, err := Find(filepath.Join(dir, "homemedia-app")); err == nil || !strings.Contains(err.Error(), "mediad not found") {
-			t.Errorf("missing binary: err = %v", err)
-		}
 		writeScript(t, filepath.Join(dir, "mediad"), "")
-		if _, err := Find(filepath.Join(dir, "homemedia-app")); err == nil || !strings.Contains(err.Error(), "working directory") {
-			t.Errorf("missing dir: err = %v", err)
+		c, err := Find(filepath.Join(dir, "homemedia-app"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(home, "Library", "Application Support", "HomeMedia")
+		if c.Dir != want {
+			t.Errorf("Dir = %q, want %q", c.Dir, want)
+		}
+		for _, d := range []string{want, filepath.Join(home, "Media")} {
+			if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+				t.Errorf("%s not created: %v", d, err)
+			}
+		}
+	})
+
+	t.Run("fallback leaves an existing setup alone", func(t *testing.T) {
+		for name, setup := range map[string]func(home string){
+			"documents media": func(h string) { _ = os.MkdirAll(filepath.Join(h, "Documents", "Media"), 0o755) },
+			"existing .env": func(h string) {
+				d := filepath.Join(h, "Library", "Application Support", "HomeMedia")
+				_ = os.MkdirAll(d, 0o755)
+				_ = os.WriteFile(filepath.Join(d, ".env"), nil, 0o600)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				setup(home)
+				dir := t.TempDir()
+				writeScript(t, filepath.Join(dir, "mediad"), "")
+				if _, err := Find(filepath.Join(dir, "homemedia-app")); err != nil {
+					t.Fatal(err)
+				}
+				if fileExists(filepath.Join(home, "Media")) {
+					t.Error("created ~/Media although a media setup exists")
+				}
+			})
+		}
+	})
+
+	t.Run("missing binary", func(t *testing.T) {
+		if _, err := Find(filepath.Join(t.TempDir(), "homemedia-app")); err == nil || !strings.Contains(err.Error(), "mediad not found") {
+			t.Errorf("err = %v", err)
 		}
 	})
 }

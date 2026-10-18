@@ -33,7 +33,8 @@ type Config struct {
 //
 // Binary: $HOMEMEDIA_MEDIAD, else "mediad" next to exe.
 // Dir: $HOMEMEDIA_DIR, else the path in ../Resources/workdir (written by
-// scripts/package-app.sh), else exe's parent dir when it holds a .env (bin/ in the repo).
+// scripts/package-app.sh), else exe's parent dir when it holds a .env (bin/ in the repo),
+// else ~/Library/Application Support/HomeMedia (created; a downloaded app has no repo).
 func Find(exe string) (Config, error) {
 	exeDir := filepath.Dir(exe)
 	bin := os.Getenv("HOMEMEDIA_MEDIAD")
@@ -55,13 +56,18 @@ func Find(exe string) (Config, error) {
 			dir = parent
 		}
 	}
-	if dir == "" {
-		return Config{}, errors.New("no working directory for mediad (set HOMEMEDIA_DIR)")
-	}
-
 	home, err := os.UserHomeDir()
 	if err != nil {
+		if dir == "" {
+			return Config{}, errors.New("no working directory for mediad (set HOMEMEDIA_DIR)")
+		}
 		return Config{}, err
+	}
+	if dir == "" {
+		dir = filepath.Join(home, "Library", "Application Support", "HomeMedia")
+		if err := firstRun(dir, home); err != nil {
+			return Config{}, fmt.Errorf("preparing %s: %w", dir, err)
+		}
 	}
 	return Config{
 		Binary:  bin,
@@ -69,6 +75,24 @@ func Find(exe string) (Config, error) {
 		LogPath: filepath.Join(home, "Library", "Logs", "homemedia", "mediad.log"),
 		Port:    8200,
 	}, nil
+}
+
+// firstRun creates the app's working dir and, when nothing configures a media
+// folder yet, an empty ~/Media: mediad refuses to start without one, and a
+// new user would otherwise see no server and no way to open Settings.
+func firstRun(dir, home string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if fileExists(filepath.Join(dir, ".env")) {
+		return nil
+	}
+	for _, m := range []string{filepath.Join(home, "Media"), filepath.Join(home, "Documents", "Media")} {
+		if fileExists(m) {
+			return nil
+		}
+	}
+	return os.MkdirAll(filepath.Join(home, "Media"), 0o755)
 }
 
 func trimNL(b []byte) []byte {

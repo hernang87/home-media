@@ -13,6 +13,15 @@ A small media server for your home network. It scans a folder of movies and show
 - A C toolchain for the desktop app (Fyne uses cgo)
 - macOS for the desktop app and the launchd service. `mediad` itself is plain Go.
 
+## Download (macOS, Apple silicon)
+
+1. `brew install ffmpeg`
+2. Download `HomeMedia-<version>-arm64.zip` from the [Releases](https://github.com/hernang87/home-media/releases) page, unzip it and move `HomeMedia.app` to `/Applications`.
+3. The app is not notarized, so macOS blocks the first launch. Run `xattr -dr com.apple.quarantine /Applications/HomeMedia.app`, then open it.
+4. Put your movies and shows in `~/Media` (created on first launch) or pick another folder in the Settings tab, then restart the app.
+
+The app keeps its settings and cache in `~/Library/Application Support/HomeMedia` and logs to `~/Library/Logs/homemedia/mediad.log`.
+
 ## Build and run
 
 ```sh
@@ -26,7 +35,7 @@ Other commands:
 
 - `bin/mediad doctor` checks your setup.
 - `bin/mediad install` / `uninstall` manage a launchd agent so `mediad` starts at login.
-- `bash scripts/package-app.sh` builds `bin/HomeMedia.app`.
+- `bash scripts/package-app.sh` builds `bin/HomeMedia.app` for this checkout. Add `--release` for a portable build that keeps its files in Application Support.
 
 ## Configuration
 
