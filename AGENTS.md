@@ -59,6 +59,7 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 - Do not wrap `slog.Default().Handler()` in a handler passed to `slog.SetDefault` (it recurses); build a fresh handler.
 - App-owned `mediad` (child of `homemedia-app`) gets `HOMEMEDIA_PARENT_PID` and exits when that process dies, even on a hard kill. A `mediad` already running (launchd, terminal) is used as-is and never stopped by the app; `bin/mediad uninstall` if you want the app to own it.
 - `mediad` runs `caffeinate -i -w <pid>` so the Mac does not idle-sleep while it is up.
+- The menu bar item (`internal/ui/tray.go`) polls the chosen TV every 3 s, even with the window hidden, and refreshes the menu only when `vm.Tray` changes.
 - Audio-only Cast devices (mDNS `ca` bit 0 unset) are hidden.
 - Settings writes (`POST /api/settings`) are accepted only from loopback or mediad's own addresses. `GET /api/settings` never returns the TMDB key, only `tmdbKeySet`.
 - `.env` is rewritten by `config.UpdateEnvFile` (atomic, mode 0600). It replaces the first occurrence of a key, because `parseDotEnv` is first-wins. Real env vars still override `.env`, and `daemon.Start` always sets `PORT`.

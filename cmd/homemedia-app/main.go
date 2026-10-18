@@ -46,6 +46,9 @@ func stopOwned() {
 	}
 }
 
+// tray is the menu bar menu; nil where the platform has no system tray.
+var tray *ui.Tray
+
 //go:embed icon.png
 var iconPNG []byte
 
@@ -60,9 +63,8 @@ func main() {
 	// offers Quit (Fyne appends it), which is what stops an app-owned mediad.
 	if da, ok := a.(desktop.App); ok {
 		da.SetSystemTrayIcon(icon)
-		da.SetSystemTrayMenu(fyne.NewMenu("HomeMedia",
-			fyne.NewMenuItem("Open HomeMedia", func() { w.Show(); w.RequestFocus() }),
-		))
+		tray = ui.NewTray(func() { w.Show(); w.RequestFocus() })
+		da.SetSystemTrayMenu(tray.Menu)
 		w.SetCloseIntercept(w.Hide)
 	}
 
@@ -204,5 +206,8 @@ func askAddress(a fyne.App, w fyne.Window, status *widget.Label) {
 
 func start(a fyne.App, w fyne.Window, base string) {
 	a.Preferences().SetString(prefServer, base)
-	ui.NewApp(a, w, client.New(base))
+	app := ui.NewApp(a, w, client.New(base))
+	if tray != nil {
+		tray.Attach(app)
+	}
 }

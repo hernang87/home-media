@@ -410,3 +410,41 @@ func TestLogs(t *testing.T) {
 		t.Errorf("request = %+v", r)
 	}
 }
+
+func TestSetWatchedMany(t *testing.T) {
+	tests := []struct {
+		name      string
+		failOn    string // item ID the server rejects; "" = none
+		wantCalls []string
+		wantErr   bool
+	}{
+		{"all succeed", "", []string{"a", "b", "c"}, false},
+		{"stops at first failure", "b", []string{"a", "b"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					ID      string `json:"id"`
+					Watched bool   `json:"watched"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				calls = append(calls, req.ID)
+				if req.ID == tc.failOn {
+					http.Error(w, "boom", http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer srv.Close()
+			err := New(srv.URL).SetWatchedMany(context.Background(), []string{"a", "b", "c"}, true)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(calls, tc.wantCalls) {
+				t.Errorf("calls = %v, want %v", calls, tc.wantCalls)
+			}
+		})
+	}
+}

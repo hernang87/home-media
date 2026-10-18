@@ -164,7 +164,8 @@ func showBody(a *App, key string) fyne.CanvasObject {
 		if s.Number == 0 {
 			title = "Specials"
 		}
-		var rows []fyne.CanvasObject
+		seasonWatched := vm.AllWatched(s.Episodes)
+		rows := []fyne.CanvasObject{seasonMarkButton(a, key, title, s.Episodes, seasonWatched)}
 		unwatched := false
 		for _, ep := range s.Episodes {
 			ep := ep
@@ -190,6 +191,38 @@ func showBody(a *App, key string) fyne.CanvasObject {
 	}
 	items = append(items, acc)
 	return container.NewVBox(items...)
+}
+
+// seasonMarkButton marks every episode of a season watched or unwatched, then
+// rebuilds the show screen so the episode rows show the new state.
+func seasonMarkButton(a *App, showKey, title string, eps []model.PublicItem, watched bool) *widget.Button {
+	var btn *widget.Button
+	btn = widget.NewButton(seasonMarkLabel(watched), func() {
+		btn.Disable()
+		ids := vm.IDs(eps)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := a.Client.SetWatchedMany(ctx, ids, !watched); err != nil {
+				fyne.Do(btn.Enable)
+				a.ShowError(fmt.Errorf("could not update %s: %w", title, err))
+				return
+			}
+			_ = a.ReloadSync()
+			fyne.Do(func() {
+				a.Pop()
+				a.Push(NewDetail(a, showKey, true))
+			})
+		}()
+	})
+	return btn
+}
+
+func seasonMarkLabel(watched bool) string {
+	if watched {
+		return "Mark season unwatched"
+	}
+	return "Mark season watched"
 }
 
 // newBackdrop shows the backdrop image, loaded through the art cache.

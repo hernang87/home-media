@@ -394,6 +394,7 @@ function openShow(show) {
     show.overview && h("p", null, show.overview),
     seasons.map((s) => [
       h("h2", null, s === 0 ? "Specials" : `Season ${s}`),
+      seasonButton(eps.filter((e) => e.season === s)),
       eps.filter((e) => e.season === s).map((e) => h("button", { class: "ep", onclick: () => openItem(e) },
         h("span", { class: "n" }, `E${e.episode}`),
         h("span", { class: "tt" }, e.title || `Episode ${e.episode}`),
@@ -428,6 +429,19 @@ function openItem(it) {
       partial && h("button", { class: "btn", onclick: () => markWatched(it, false) }, "Clear progress"),
     ),
   );
+}
+
+function seasonButton(eps) {
+  const all = eps.length > 0 && eps.every((e) => e.progress && e.progress.watched);
+  return h("button", { class: "btn", onclick: () => markSeason(eps, !all) }, all ? "Mark season unwatched" : "Mark season watched");
+}
+
+async function markSeason(eps, watched) {
+  try {
+    for (const e of eps) await api("/api/progress", { body: { id: e.id, watched } });
+    closeSheet();
+    await loadLibrary();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function markWatched(it, watched) {

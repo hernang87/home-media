@@ -174,6 +174,16 @@ func (c *Client) SetWatched(ctx context.Context, id string, watched bool) error 
 	return c.call(ctx, timeoutStd, http.MethodPost, "/api/progress", body, nil)
 }
 
+// SetWatchedMany marks each item in turn and stops at the first failure.
+func (c *Client) SetWatchedMany(ctx context.Context, ids []string, watched bool) error {
+	for _, id := range ids {
+		if err := c.SetWatched(ctx, id, watched); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *Client) Devices(ctx context.Context) ([]Device, error) {
 	var out []Device
 	err := c.call(ctx, timeoutStd, http.MethodGet, "/api/cast/devices", nil, &out)
