@@ -4,7 +4,7 @@ Guide for AI coding agents working in this repo.
 
 ## What this is
 
-Go media server (module `homemedia`), no web UI.
+Go media server (module `homemedia`). `mediad` serves a small phone control page at `/` (LAN only).
 
 - `cmd/mediad`: daemon. Scans `MEDIA_DIR`, serves direct play and HLS transcode (ffmpeg), converts subtitles to WebVTT, casts to Chromecast. The CASTv2 client is hand-rolled in `internal/cast` and uses the stock Default Media Receiver.
 - `cmd/homemedia-app`: Fyne macOS desktop client. Talks to mediad over HTTP via `internal/client`.
@@ -21,6 +21,8 @@ Go media server (module `homemedia`), no web UI.
 - `internal/transcode`: on-demand HLS segments via ffmpeg
 - `internal/api`: HTTP API and media files (`GET /api/logs?after=<seq>` serves the log ring)
 - `internal/logbuf`: in-memory slog ring buffer behind the app's Logs tab
+- `internal/web`: embedded phone page (plain HTML/JS in `static/`, no build step; rebuild `mediad` to pick up edits)
+- `internal/daemon`: the desktop app starts `mediad` when none answers on 127.0.0.1:8200, and stops it on quit
 - `internal/cast`: Chromecast discovery and CASTv2 playback
 - `internal/discovery`: mDNS advertise and browse
 - `internal/client`: typed HTTP client for mediad
@@ -55,5 +57,7 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 - Without `TMDB_API_KEY`, posters are null and the app falls back to the backdrop.
 - Device names in URLs must be percent-encoded, or use the device ID.
 - Do not wrap `slog.Default().Handler()` in a handler passed to `slog.SetDefault` (it recurses); build a fresh handler.
+- App-owned `mediad` (child of `homemedia-app`) gets `HOMEMEDIA_PARENT_PID` and exits when that process dies, even on a hard kill. A `mediad` already running (launchd, terminal) is used as-is and never stopped by the app; `bin/mediad uninstall` if you want the app to own it.
+- `mediad` runs `caffeinate -i -w <pid>` so the Mac does not idle-sleep while it is up.
 - Audio-only Cast devices (mDNS `ca` bit 0 unset) are hidden.
 - Never commit `.env`, `data/` or `bin/`.

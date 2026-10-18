@@ -5,8 +5,12 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -16,11 +20,30 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"homemedia/internal/client"
+	"homemedia/internal/daemon"
 	"homemedia/internal/discovery"
 	"homemedia/internal/ui"
 )
 
-const prefServer = "server"
+const (
+	prefServer = "server"
+	localBase  = "http://127.0.0.1:8200"
+)
+
+// owned is the mediad this app started, if any. Quitting the app stops it.
+var (
+	ownedMu sync.Mutex
+	owned   *daemon.Proc
+)
+
+func stopOwned() {
+	ownedMu.Lock()
+	p := owned
+	ownedMu.Unlock()
+	if p != nil {
+		p.Stop()
+	}
+}
 
 //go:embed icon.png
 var iconPNG []byte
@@ -33,6 +56,17 @@ func main() {
 
 	status := widget.NewLabel("Looking for your media server…")
 	w.SetContent(container.NewCenter(container.NewVBox(widget.NewProgressBarInfinite(), status)))
+
+	// Cmd-Q and the window close button end up in OnStopped; Ctrl-C and SIGTERM
+	// bypass it. A hard kill is covered by mediad watching its parent.
+	a.Lifecycle().SetOnStopped(stopOwned)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		stopOwned()
+		os.Exit(0)
+	}()
 
 	go connect(a, w, status)
 	w.ShowAndRun()
@@ -55,6 +89,11 @@ func connect(a fyne.App, w fyne.Window, status *widget.Label) {
 		}
 	}
 
+	if base, ok := startLocal(status); ok {
+		fyne.Do(func() { start(a, w, base) })
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	if servers, err := discovery.Browse(ctx, 4); err == nil {
@@ -69,6 +108,48 @@ func connect(a fyne.App, w fyne.Window, status *widget.Label) {
 		status.SetText("No server found on this network.")
 		askAddress(a, w, status)
 	})
+}
+
+// startLocal uses a mediad already answering on this machine, or starts one
+// that this app then owns and stops on quit.
+func startLocal(status *widget.Label) (string, bool) {
+	if reachable(localBase) {
+		return localBase, true // someone else runs it (launchd, a terminal); not ours to stop
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	cfg, err := daemon.Find(exe)
+	if err != nil {
+		slog.Info("not starting a local server", "reason", err)
+		return "", false
+	}
+	fyne.Do(func() { status.SetText("Starting the media server…") })
+	p, err := daemon.Start(cfg)
+	if err != nil {
+		slog.Warn("could not start mediad", "err", err)
+		return "", false
+	}
+	ownedMu.Lock()
+	owned = p
+	ownedMu.Unlock()
+
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case <-p.Done():
+			slog.Warn("mediad exited right after starting", "log", cfg.LogPath)
+			return "", false
+		case <-deadline:
+			p.Stop()
+			return "", false
+		case <-time.After(500 * time.Millisecond):
+			if reachable(localBase) {
+				return localBase, true
+			}
+		}
+	}
 }
 
 func reachable(base string) bool {

@@ -14,6 +14,10 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
 echo "Building homemedia-app..."
 go build -o "$CONTENTS/MacOS/homemedia-app" ./cmd/homemedia-app
+echo "Building mediad (the app starts it and stops it on quit)..."
+go build -o "$CONTENTS/MacOS/mediad" ./cmd/mediad
+# Where mediad reads .env and keeps data/ (see internal/daemon).
+printf '%s\n' "$ROOT" > "$CONTENTS/Resources/workdir"
 
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

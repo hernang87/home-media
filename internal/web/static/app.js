@@ -1,0 +1,451 @@
+"use strict";
+
+// Phone control page for mediad. Talks to the same /api routes as the desktop app.
+
+const $ = (id) => document.getElementById(id);
+const view = $("view");
+
+const state = {
+  tab: "remote",
+  items: new Map(), // id -> public item
+  shows: [],
+  devices: [],
+  device: load("device"),
+  status: null,
+  statusErr: "",
+  query: "",
+  kind: "movies", // movies | shows
+  logs: { after: 0, entries: [] },
+  info: null,
+  scan: null,
+};
+
+function load(key) {
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* private mode */ }
+}
+
+// h builds an element. Text goes in as text nodes, so file names cannot inject markup.
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "style") el.style.cssText = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+// mount replaces the page body. Unlike replaceChildren it flattens arrays and skips false/null.
+function mount(...kids) {
+  view.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+}
+
+async function api(path, opts) {
+  const init = opts && opts.body !== undefined
+    ? { method: opts.method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(opts.body) }
+    : { method: (opts && opts.method) || "GET" };
+  const res = await fetch(path, init);
+  let data = null;
+  try { data = await res.json(); } catch { /* empty body */ }
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+let toastTimer;
+function toast(msg, isErr) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (isErr ? " err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, 2800);
+}
+
+function clock(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const hh = Math.floor(sec / 3600), mm = Math.floor(sec % 3600 / 60), ss = sec % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return hh ? `${hh}:${p(mm)}:${p(ss)}` : `${mm}:${p(ss)}`;
+}
+
+function itemTitle(it) {
+  if (!it) return "";
+  if (it.show) return `${it.show.title} · S${it.season}E${it.episode}${it.title ? " · " + it.title : ""}`;
+  return it.title + (it.year ? ` (${it.year})` : "");
+}
+
+function currentDevice() {
+  return state.devices.find((d) => d.id === state.device) || null;
+}
+const devPath = (suffix) => `/api/cast/${encodeURIComponent(state.device)}/${suffix}`;
+
+// ---- data loading ----
+
+async function loadLibrary() {
+  try {
+    const snap = await api("/api/library");
+    state.items = new Map(snap.items.map((i) => [i.id, i]));
+    state.shows = snap.shows;
+    state.scan = snap.status;
+    if (state.tab === "library" && document.activeElement.id !== "q") renderLibrary();
+  } catch (e) { /* server restarting; next poll retries */ }
+}
+
+async function loadDevices() {
+  try {
+    state.devices = await api("/api/cast/devices");
+  } catch { return; }
+  if (!currentDevice() && state.devices.length) state.device = state.devices[0].id;
+  const sel = $("device");
+  sel.replaceChildren(...(state.devices.length
+    ? state.devices.map((d) => h("option", { value: d.id, selected: d.id === state.device }, d.name))
+    : [h("option", { value: "" }, "No Chromecast found")]));
+}
+
+async function pollStatus() {
+  if (!state.device) { state.status = null; return; }
+  try {
+    state.status = await api(devPath("status"));
+    state.statusErr = "";
+  } catch (e) {
+    state.status = null;
+    state.statusErr = e.message;
+  }
+  if (state.tab === "remote") renderRemote();
+}
+
+// ---- tabs ----
+
+function setTab(tab) {
+  state.tab = tab;
+  save("tab", tab);
+  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
+  window.scrollTo(0, 0);
+  render();
+}
+
+function render() {
+  if (state.tab === "remote") renderRemote();
+  else if (state.tab === "library") renderLibrary();
+  else renderServer();
+}
+
+// ---- remote ----
+
+let seeking = false;
+
+function renderRemote() {
+  // Don't rebuild the controls while a finger is on a slider.
+  // (also while a picker is open: rebuilding it would close the dropdown)
+  const active = document.activeElement;
+  if (seeking || (active && view.contains(active) && (active.tagName === "SELECT" || active.tagName === "INPUT"))) return;
+  const st = state.status;
+  const dev = currentDevice();
+  if (!dev) {
+    mount(h("div", { class: "empty" }, "No Chromecast found yet.", h("br"), "Make sure the TV is on and on this Wi-Fi."));
+    return;
+  }
+  const playing = st && st.itemId && !["IDLE", "DISCONNECTED", ""].includes(st.state);
+  if (!playing) {
+    const msg = state.statusErr ? `Can't reach ${dev.name}: ${state.statusErr}` : `Nothing playing on ${dev.name}.`;
+    mount(
+      h("div", { class: "empty" }, msg),
+      h("div", { class: "btns" }, h("button", { class: "btn primary", onclick: () => setTab("library") }, "Pick something to play")),
+    );
+    return;
+  }
+  const it = state.items.get(st.itemId);
+  const isPlaying = st.state === "PLAYING" || st.state === "BUFFERING";
+  const art = it && (it.backdrop || it.poster);
+  const send = (action, value) => control(action, value);
+
+  const seek = h("input", {
+    class: "seek", type: "range", min: 0, max: Math.max(1, Math.floor(st.duration)), step: 1, value: Math.floor(st.position),
+    oninput: (e) => { seeking = true; cur.textContent = clock(e.target.value); },
+    onchange: (e) => { seeking = false; send("seek", Number(e.target.value)); },
+  });
+  const cur = h("span", null, clock(st.position));
+  const subs = it ? it.subs : [];
+  const audio = it ? it.audio : [];
+
+  mount(h("div", { class: "now" },
+    h("div", { class: "art", style: art ? `background-image:url("${art}")` : "" }),
+    h("div", { class: "body" },
+      h("h3", null, itemTitle(it) || "Playing"),
+      h("div", { class: "dim" }, `${st.state.toLowerCase()} on ${dev.name}${st.mode ? " · " + st.mode : ""}`),
+      seek,
+      h("div", { class: "times" }, cur, h("span", null, clock(st.duration))),
+      h("div", { class: "transport" },
+        h("button", { class: "btn", onclick: () => send("seek", Math.max(0, st.position - 30)) }, "−30"),
+        h("button", { class: "btn", onclick: () => send("seek", Math.max(0, st.position - 10)) }, "−10"),
+        h("button", { class: "btn primary big", onclick: () => send(isPlaying ? "pause" : "resume") }, isPlaying ? "❚❚" : "▶"),
+        h("button", { class: "btn", onclick: () => send("seek", st.position + 10) }, "+10"),
+        h("button", { class: "btn", onclick: () => send("seek", st.position + 30) }, "+30"),
+      ),
+      h("div", { class: "row" },
+        h("label", null, "Volume"),
+        h("input", { type: "range", min: 0, max: 100, value: Math.round((st.volume || 0) * 100), onchange: (e) => send("volume", Number(e.target.value) / 100) }),
+        h("button", { class: "btn", onclick: () => send("mute", !st.muted) }, st.muted ? "Unmute" : "Mute"),
+      ),
+      audio.length > 1 && h("div", { class: "row" },
+        h("label", null, "Audio"),
+        h("select", { onchange: (e) => send("audio", Number(e.target.value)) },
+          audio.map((a) => h("option", { value: a.index, selected: a.index === st.audio }, audioLabel(a)))),
+      ),
+      subs.length > 0 && h("div", { class: "row" },
+        h("label", null, "Subs"),
+        h("select", { onchange: (e) => send("sub", e.target.value) },
+          h("option", { value: "" }, "Off"),
+          subs.map((s) => h("option", { value: s.id, selected: s.id === st.sub }, s.label || s.lang || s.id))),
+      ),
+      h("div", { class: "btns" }, h("button", { class: "btn danger", onclick: () => control("stop") }, "Stop")),
+    ),
+  ));
+}
+
+function audioLabel(a) {
+  const parts = [a.title || a.lang || `Track ${a.index + 1}`];
+  if (a.codec) parts.push(a.codec);
+  if (a.channels) parts.push(`${a.channels}ch`);
+  return parts.join(" · ");
+}
+
+async function control(action, value) {
+  try {
+    await api(devPath("control"), { body: { action, value } });
+    setTimeout(pollStatus, 300);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- library ----
+
+function posterOf(x) { return x.poster || x.backdrop || ""; }
+
+function card(x, onclick, sub) {
+  const img = posterOf(x);
+  const p = x.progress;
+  const frac = p && x.duration > 0 && !p.watched ? Math.min(1, p.pos / x.duration) : 0;
+  return h("button", { class: "card", onclick },
+    h("div", { class: "poster", style: img ? `background-image:url("${img}")` : "" },
+      !img && h("div", { class: "fallback" }, x.title),
+      frac > 0 && h("div", { class: "bar", style: `width:${Math.round(frac * 100)}%` }),
+      p && p.watched && h("div", { class: "tick" }, "✓"),
+    ),
+    h("div", { class: "t" }, x.show ? x.show.title : x.title),
+    sub && h("div", { class: "s" }, sub),
+  );
+}
+
+function renderLibrary() {
+  const q = state.query.trim().toLowerCase();
+  const all = [...state.items.values()];
+  const matches = (s) => !q || s.toLowerCase().includes(q);
+
+  const resume = all
+    .filter((i) => i.progress && !i.progress.watched && i.progress.pos >= 30)
+    .sort((a, b) => b.progress.t - a.progress.t)
+    .slice(0, 12);
+  const movies = all.filter((i) => i.type === "movie" && matches(i.title));
+  const shows = state.shows.filter((s) => matches(s.title));
+
+  const search = h("input", {
+    type: "search", placeholder: "Search", value: state.query, id: "q",
+    oninput: (e) => { state.query = e.target.value; renderLibrary(); const q = $("q"); q.focus(); q.setSelectionRange(q.value.length, q.value.length); },
+  });
+  const chips = h("div", { class: "chips" },
+    ["movies", "shows"].map((k) => h("button", { class: "chip" + (state.kind === k ? " on" : ""), onclick: () => { state.kind = k; renderLibrary(); } }, k === "movies" ? "Movies" : "Shows")));
+
+  const list = state.kind === "movies"
+    ? movies.map((m) => card(m, () => openItem(m), m.year))
+    : shows.map((s) => card(s, () => openShow(s), s.year));
+
+  mount(
+    search,
+    !q && resume.length > 0 && [h("h2", null, "Continue watching"), h("div", { class: "shelf" }, resume.map((i) => card(i, () => openItem(i), i.show ? `S${i.season}E${i.episode}` : clock(i.progress.pos))))],
+    chips,
+    list.length ? h("div", { class: "grid" }, list) : h("div", { class: "empty" }, state.items.size ? "No matches." : "Library is empty or still scanning."),
+  );
+}
+
+// ---- sheets ----
+
+function closeSheet() {
+  const s = $("sheet");
+  s.hidden = true;
+  s.replaceChildren();
+}
+
+function showSheet(...kids) {
+  const s = $("sheet");
+  s.replaceChildren(h("div", { class: "sheet", onclick: (e) => e.stopPropagation() }, kids));
+  s.onclick = closeSheet;
+  s.hidden = false;
+}
+
+function openShow(show) {
+  const eps = show.episodes.map((id) => state.items.get(id)).filter(Boolean);
+  const seasons = [...new Set(eps.map((e) => e.season))];
+  showSheet(
+    h("h3", null, show.title),
+    h("div", { class: "meta" }, [show.year, show.genres && show.genres.slice(0, 3).join(", "), show.rating && `★ ${show.rating.toFixed(1)}`].filter(Boolean).join(" · ")),
+    show.overview && h("p", null, show.overview),
+    seasons.map((s) => [
+      h("h2", null, s === 0 ? "Specials" : `Season ${s}`),
+      eps.filter((e) => e.season === s).map((e) => h("button", { class: "ep", onclick: () => openItem(e) },
+        h("span", { class: "n" }, `E${e.episode}`),
+        h("span", { class: "tt" }, e.title || `Episode ${e.episode}`),
+        e.progress && e.progress.watched && h("span", { class: "ok" }, "✓"),
+        e.progress && !e.progress.watched && e.progress.pos >= 30 && h("span", { class: "dim" }, clock(e.progress.pos)),
+      )),
+    ]),
+  );
+}
+
+function openItem(it) {
+  const defAudio = (it.audio.find((a) => a.default) || it.audio[0] || { index: 0 }).index;
+  const choice = { audio: defAudio, sub: "" };
+  const dev = currentDevice();
+  const watched = it.progress && it.progress.watched;
+  showSheet(
+    it.backdrop && h("div", { class: "backdrop", style: `background-image:url("${it.backdrop}")` }),
+    h("h3", null, itemTitle(it)),
+    h("div", { class: "meta" }, [it.runtime ? `${it.runtime} min` : it.duration ? `${Math.round(it.duration / 60)} min` : "", it.rating && `★ ${it.rating.toFixed(1)}`, it.playMode === "direct" ? "direct play" : "transcode"].filter(Boolean).join(" · ")),
+    it.overview && h("p", null, it.overview),
+    it.audio.length > 1 && h("div", { class: "row" }, h("label", null, "Audio"),
+      h("select", { onchange: (e) => { choice.audio = Number(e.target.value); } },
+        it.audio.map((a) => h("option", { value: a.index, selected: a.index === defAudio }, audioLabel(a))))),
+    it.subs.length > 0 && h("div", { class: "row" }, h("label", null, "Subs"),
+      h("select", { onchange: (e) => { choice.sub = e.target.value; } },
+        h("option", { value: "" }, "Off"),
+        it.subs.map((s) => h("option", { value: s.id }, s.label || s.lang || s.id)))),
+    h("div", { class: "actions" },
+      h("button", { class: "btn primary", disabled: !dev, onclick: () => play(it, choice) }, dev ? `Play on ${dev.name}` : "No Chromecast"),
+      h("button", { class: "btn", onclick: () => markWatched(it, !watched) }, watched ? "Mark unwatched" : "Mark watched"),
+    ),
+  );
+}
+
+async function markWatched(it, watched) {
+  try {
+    await api("/api/progress", { body: { id: it.id, watched } });
+    closeSheet();
+    await loadLibrary();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function play(it, choice, resume) {
+  const body = { id: it.id, audio: choice.audio, sub: choice.sub };
+  if (resume) body.resume = resume;
+  try {
+    await api(devPath("play"), { body });
+    closeSheet();
+    setTab("remote");
+    pollStatus();
+  } catch (e) {
+    if (e.status === 409 && e.data && e.data.code === "resume") {
+      askResume(it, choice, e.data.position);
+    } else {
+      toast(e.message, true);
+    }
+  }
+}
+
+function askResume(it, choice, pos) {
+  showSheet(
+    h("h3", null, itemTitle(it)),
+    h("div", { class: "meta" }, `You stopped at ${clock(pos)}.`),
+    h("div", { class: "actions" },
+      h("button", { class: "btn primary", onclick: () => play(it, choice, "continue") }, `Continue from ${clock(pos)}`),
+      h("button", { class: "btn", onclick: () => play(it, choice, "restart") }, "Start over"),
+      h("button", { class: "btn", onclick: closeSheet }, "Cancel"),
+    ),
+  );
+}
+
+// ---- server ----
+
+async function loadServer() {
+  try {
+    const [info, scan] = await Promise.all([api("/api/info"), api("/api/status")]);
+    state.info = info;
+    state.scan = scan;
+    const logs = await api(`/api/logs?after=${state.logs.after}`);
+    if (logs.last < state.logs.after) state.logs = { after: 0, entries: [] }; // server restarted
+    state.logs.entries = state.logs.entries.concat(logs.entries).slice(-300);
+    state.logs.after = logs.last;
+  } catch { return; }
+  if (state.tab === "server") renderServer();
+}
+
+function renderServer() {
+  const i = state.info, s = state.scan;
+  const log = h("div", { class: "log", id: "log" },
+    state.logs.entries.map((e) => h("div", { class: e.level }, `${new Date(e.time).toLocaleTimeString()} ${e.level} ${e.msg}`)));
+  const old = $("log");
+  const stick = !old || old.scrollTop + old.clientHeight >= old.scrollHeight - 24;
+  mount(
+    h("h2", null, "Server"),
+    i ? h("div", { class: "kv" },
+      h("span", null, "Name"), h("span", null, i.name),
+      h("span", null, "Address"), h("span", null, i.base),
+      h("span", null, "Version"), h("span", null, i.version),
+      h("span", null, "TMDB"), h("span", null, i.tmdb ? "on" : "off (using video frames)"),
+      h("span", null, "Library"), h("span", null, `${state.items.size} items`),
+      h("span", null, "Scan"), h("span", null, s && s.scanning ? `${s.phase} ${s.done}/${s.total}` : "idle"),
+    ) : h("div", { class: "empty" }, "Can't reach the server."),
+    h("div", { class: "btns" },
+      h("button", { class: "btn", onclick: () => scan(false) }, "Rescan"),
+      h("button", { class: "btn", onclick: () => scan(true) }, "Refresh metadata"),
+    ),
+    h("h2", null, "Logs"),
+    log,
+  );
+  if (stick) log.scrollTop = log.scrollHeight;
+  else old && (log.scrollTop = old.scrollTop);
+}
+
+async function scan(refresh) {
+  try {
+    await api("/api/scan" + (refresh ? "?refresh" : ""), { body: {} });
+    toast(refresh ? "Refreshing metadata…" : "Scanning…");
+    setTimeout(loadServer, 800);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- start ----
+
+$("device").addEventListener("change", (e) => {
+  state.device = e.target.value;
+  save("device", state.device);
+  state.status = null;
+  pollStatus().then(render);
+});
+for (const b of document.querySelectorAll("#tabs button")) b.addEventListener("click", () => setTab(b.dataset.tab));
+
+(async function init() {
+  api("/api/info").then((i) => { state.info = i; $("name").textContent = i.name; document.title = i.name; }).catch(() => {});
+  await Promise.all([loadLibrary(), loadDevices()]);
+  const tab = load("tab");
+  setTab(["remote", "library", "server"].includes(tab) ? tab : "remote");
+  pollStatus();
+  setInterval(() => { if (!document.hidden) pollStatus(); }, 1500);
+  setInterval(() => { if (!document.hidden) loadDevices(); }, 20000);
+  setInterval(() => { if (!document.hidden && state.tab === "server") loadServer(); }, 3000);
+  setInterval(() => { if (!document.hidden && state.tab !== "server") loadLibrary(); }, 30000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { pollStatus(); loadLibrary(); } });
+  loadServer();
+})();

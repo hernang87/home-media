@@ -20,6 +20,7 @@ import (
 	"homemedia/internal/logbuf"
 	"homemedia/internal/metadata"
 	"homemedia/internal/transcode"
+	"homemedia/internal/web"
 )
 
 const version = "0.1.0"
@@ -66,6 +67,7 @@ func run(logs *logbuf.Buffer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	watchParent(ctx, stop) // exit with the desktop app that started us
 
 	meta := &metadata.Client{APIKey: cfg.TMDBAPIKey, Language: cfg.TMDBLanguage}
 	lib := library.New(cfg, meta)
@@ -81,9 +83,12 @@ func run(logs *logbuf.Buffer) error {
 	caster.StopHook = tx.StopItem
 	handler := api.New(api.Deps{
 		Config: cfg, Lib: lib, TX: tx,
-		Info:  api.Info{Name: cfg.ServerName, LAN: lan, Port: cfg.Port, Base: base, TMDB: meta.Enabled(), Version: version},
-		Extra: caster.Routes,
-		Logs:  logs,
+		Info: api.Info{Name: cfg.ServerName, LAN: lan, Port: cfg.Port, Base: base, TMDB: meta.Enabled(), Version: version},
+		Extra: func(mux *http.ServeMux) {
+			caster.Routes(mux)
+			web.Routes(mux)
+		},
+		Logs: logs,
 	})
 	srv := &http.Server{Addr: fmt.Sprintf("0.0.0.0:%d", cfg.Port), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
@@ -92,6 +97,7 @@ func run(logs *logbuf.Buffer) error {
 		slog.Info("no TMDB_API_KEY set: using video frames as artwork (see .env.example)")
 	}
 
+	keepAwake(ctx)
 	go caster.Run(ctx)
 	go func() {
 		if err := discovery.Advertise(ctx, cfg.ServerName, cfg.Port); err != nil {
