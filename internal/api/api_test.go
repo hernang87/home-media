@@ -126,6 +126,7 @@ func must(t *testing.T, err error) {
 func request(method, target, body string) *http.Request {
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.RemoteAddr = lanRemote
+	req.Host = "192.168.1.10:8200"
 	return req
 }
 
@@ -351,6 +352,7 @@ func TestLANFilter(t *testing.T) {
 		t.Run(tt.remote, func(t *testing.T) {
 			req := httptest.NewRequest("GET", "/api/info", nil)
 			req.RemoteAddr = tt.remote
+			req.Host = "192.168.1.10:8200"
 			rec := httptest.NewRecorder()
 			fx.h.ServeHTTP(rec, req)
 			if rec.Code != tt.want {
@@ -389,6 +391,7 @@ func TestLogsEndpoint(t *testing.T) {
 	}{{"/api/logs", 1}, {"/api/logs?after=1", 0}} {
 		req := httptest.NewRequest("GET", tc.url, nil)
 		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1:8200"
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		var out struct {
@@ -400,5 +403,48 @@ func TestLogsEndpoint(t *testing.T) {
 		if tc.want == 1 && out.Entries[0].Msg != "hello k=v" {
 			t.Errorf("entry = %+v", out.Entries[0])
 		}
+	}
+}
+
+func TestAPIGuard(t *testing.T) {
+	fx := newFixture(t)
+	tests := []struct {
+		name   string
+		method string
+		target string
+		host   string
+		origin string
+		want   int
+	}{
+		{"no origin", "GET", "/api/info", "192.168.1.10:8200", "", 200},
+		{"same origin", "POST", "/api/scan", "192.168.1.10:8200", "http://192.168.1.10:8200", 200},
+		{"foreign origin post", "POST", "/api/scan", "192.168.1.10:8200", "https://evil.example", 403},
+		{"foreign origin get", "GET", "/api/info", "192.168.1.10:8200", "https://evil.example", 403},
+		{"foreign preflight", "OPTIONS", "/api/scan", "192.168.1.10:8200", "https://evil.example", 403},
+		{"null origin", "POST", "/api/scan", "192.168.1.10:8200", "null", 403},
+		{"rebinding host", "GET", "/api/info", "evil.example:8200", "http://evil.example:8200", 403},
+		{"mdns host", "GET", "/api/info", "mac.local:8200", "", 200},
+		{"short host", "GET", "/api/info", "macbook:8200", "", 200},
+		{"localhost", "GET", "/api/info", "localhost:8200", "", 200},
+		{"ipv6 host", "GET", "/api/info", "[fd00::1]:8200", "", 200},
+		{"media keeps cors", "GET", "/file/a", "192.168.1.10:8200", "https://www.gstatic.com", 200},
+		{"media preflight", "OPTIONS", "/file/a", "192.168.1.10:8200", "https://www.gstatic.com", 204},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.name == "same origin" {
+				defer func() { <-fx.lib.scans }()
+			}
+			req := request(tt.method, tt.target, "")
+			req.Host = tt.host
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			rec := httptest.NewRecorder()
+			fx.h.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
+			}
+		})
 	}
 }

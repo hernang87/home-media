@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 )
 
@@ -88,6 +89,59 @@ func isLAN(remote string) bool {
 	}
 	addr = addr.Unmap()
 	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+}
+
+// apiGuard protects /api/ from web pages the user happens to have open. It
+// rejects requests whose Origin names another host (cross-site fetches and
+// form posts) and whose Host is a public-looking DNS name (DNS rebinding).
+// Media routes are left alone: the Chromecast receiver fetches them with a
+// foreign Origin.
+func apiGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if !localHostName(r.Host) || !sameOrigin(r.Header.Get("Origin"), r.Host) {
+				writeText(w, http.StatusForbidden, "Forbidden")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sameOrigin reports whether origin is empty (non-browser clients and
+// same-origin GETs) or points at host.
+func sameOrigin(origin, host string) bool {
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host == host
+}
+
+// localHostName reports whether the Host header names this machine the way a
+// LAN client would: an IP literal, localhost, a single-label name or a
+// .local/.lan/.home name.
+func localHostName(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(strings.ToLower(host), "[]")
+	if host == "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return true
+	}
+	if !strings.Contains(host, ".") {
+		return true
+	}
+	for _, suffix := range []string{".local", ".lan", ".home"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // cors mirrors server.js cors(), and answers preflight requests with 204.

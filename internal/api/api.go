@@ -46,11 +46,12 @@ type Deps struct {
 	Logs   *logbuf.Buffer // optional; served at GET /api/logs
 }
 
-// New returns the full handler: routes + CORS + LAN-only filter + request logging.
+// New returns the full handler: routes + CORS + API origin guard + LAN-only filter + request logging.
 func New(d Deps) http.Handler {
 	var h http.Handler = newMux(d)
 	h = bodyLimit(h)
 	h = cors(h)
+	h = apiGuard(h)
 	h = lanOnly(h)
 	h = requestLog(h)
 	return h
