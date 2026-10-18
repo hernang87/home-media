@@ -405,9 +405,47 @@ function openShow(show) {
   );
 }
 
+// Track choices are remembered per show by language, so the next episode opens with the same audio and subtitles.
+const maxPrefs = 100;
+
+function loadPrefs() {
+  try { return JSON.parse(load("trackPrefs") || "{}"); } catch { return {}; }
+}
+
+function rememberTracks(it, choice) {
+  if (!it.show) return;
+  const prefs = loadPrefs();
+  const key = it.show.title;
+  const was = prefs[key] || {};
+  const pref = {};
+  const audio = it.audio.length > 1 && it.audio.find((a) => a.index === choice.audio);
+  if (audio && audio.lang) pref.audio = audio.lang;
+  else if (was.audio) pref.audio = was.audio;
+  if (it.subs.length > 0) {
+    const sub = it.subs.find((s) => s.id === choice.sub);
+    if (!choice.sub) pref.sub = "";
+    else if (sub && sub.lang) pref.sub = sub.lang;
+  } else if (was.sub != null) pref.sub = was.sub;
+  delete prefs[key]; // re-insert so the oldest shows are dropped first
+  prefs[key] = pref;
+  for (const k of Object.keys(prefs).slice(0, -maxPrefs)) delete prefs[k];
+  save("trackPrefs", JSON.stringify(prefs));
+}
+
+function defaultTracks(it) {
+  const audio = (it.audio.find((a) => a.default) || it.audio[0] || { index: 0 }).index;
+  const choice = { audio, sub: "" };
+  const pref = it.show ? loadPrefs()[it.show.title] : null;
+  if (!pref) return choice;
+  const a = pref.audio && it.audio.find((x) => x.lang === pref.audio);
+  if (a) choice.audio = a.index;
+  const s = pref.sub && it.subs.find((x) => x.lang === pref.sub);
+  if (s) choice.sub = s.id;
+  return choice;
+}
+
 function openItem(it) {
-  const defAudio = (it.audio.find((a) => a.default) || it.audio[0] || { index: 0 }).index;
-  const choice = { audio: defAudio, sub: "" };
+  const choice = defaultTracks(it);
   const dev = currentDevice();
   const watched = it.progress && it.progress.watched;
   const partial = it.progress && !it.progress.watched && it.progress.pos > 0;
@@ -418,11 +456,11 @@ function openItem(it) {
     it.overview && h("p", null, it.overview),
     it.audio.length > 1 && h("div", { class: "row" }, h("label", null, "Audio"),
       h("select", { onchange: (e) => { choice.audio = Number(e.target.value); } },
-        it.audio.map((a) => h("option", { value: a.index, selected: a.index === defAudio }, audioLabel(a))))),
+        it.audio.map((a) => h("option", { value: a.index, selected: a.index === choice.audio }, audioLabel(a))))),
     it.subs.length > 0 && h("div", { class: "row" }, h("label", null, "Subs"),
       h("select", { onchange: (e) => { choice.sub = e.target.value; } },
         h("option", { value: "" }, "Off"),
-        it.subs.map((s) => h("option", { value: s.id }, s.label || s.lang || s.id)))),
+        it.subs.map((s) => h("option", { value: s.id, selected: s.id === choice.sub }, s.label || s.lang || s.id)))),
     h("div", { class: "actions" },
       h("button", { class: "btn primary", disabled: !dev, onclick: () => play(it, choice) }, dev ? `Play on ${dev.name}` : "No Chromecast"),
       h("button", { class: "btn", onclick: () => markWatched(it, !watched) }, watched ? "Mark unwatched" : "Mark watched"),
@@ -457,6 +495,7 @@ async function play(it, choice, resume) {
   if (resume) body.resume = resume;
   try {
     await api(devPath("play"), { body });
+    rememberTracks(it, choice);
     closeSheet();
     setTab("remote");
     pollStatus();
