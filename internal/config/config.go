@@ -14,7 +14,7 @@ import (
 
 // Config is the daemon configuration.
 type Config struct {
-	MediaDir     string // first existing of: arg, MEDIA_DIR, ~/Bajadas, ~/Documents/Bajadas
+	MediaDir     string // first existing of: arg, MEDIA_DIR, ~/Media, ~/Documents/Media
 	Port         int    // PORT, default 8200
 	ServerName   string // SERVER_NAME, default "Home Media"
 	TMDBAPIKey   string // TMDB_API_KEY
@@ -120,7 +120,7 @@ func LANAddress() string {
 }
 
 // findMediaDir returns the first candidate that exists and is a directory:
-// mediaArg, MEDIA_DIR, ~/Bajadas, ~/Documents/Bajadas.
+// mediaArg, MEDIA_DIR, ~/Media, ~/Documents/Media.
 func findMediaDir(mediaArg, envMediaDir string) (string, error) {
 	home, homeErr := os.UserHomeDir()
 	type candidate struct{ label, path string }
@@ -133,8 +133,8 @@ func findMediaDir(mediaArg, envMediaDir string) (string, error) {
 	add("argument", mediaArg)
 	add("MEDIA_DIR", envMediaDir)
 	if homeErr == nil {
-		add("~/Bajadas", filepath.Join(home, "Bajadas"))
-		add("~/Documents/Bajadas", filepath.Join(home, "Documents", "Bajadas"))
+		add("~/Media", filepath.Join(home, "Media"))
+		add("~/Documents/Media", filepath.Join(home, "Documents", "Media"))
 	}
 
 	var searched []string

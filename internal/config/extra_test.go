@@ -133,18 +133,18 @@ func TestTildeExpansion(t *testing.T) {
 
 func TestMediaCandidateOrder(t *testing.T) {
 	_, home := isolate(t)
-	bajadas := filepath.Join(home, "Bajadas")
-	if err := os.Mkdir(bajadas, 0o755); err != nil {
+	mediaDir := filepath.Join(home, "Media")
+	if err := os.Mkdir(mediaDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// No arg, no MEDIA_DIR: falls back to ~/Bajadas.
+	// No arg, no MEDIA_DIR: falls back to ~/Media.
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MediaDir != bajadas {
-		t.Errorf("MediaDir = %q, want %q", c.MediaDir, bajadas)
+	if c.MediaDir != mediaDir {
+		t.Errorf("MediaDir = %q, want %q", c.MediaDir, mediaDir)
 	}
 
 	// Missing arg is skipped in favour of MEDIA_DIR.
@@ -167,7 +167,7 @@ func TestMissingMediaDirError(t *testing.T) {
 		t.Fatal("Load with no media dir: want error, got nil")
 	}
 	msg := err.Error()
-	for _, want := range []string{"no media directory", missing, "MEDIA_DIR", "Bajadas"} {
+	for _, want := range []string{"no media directory", missing, "MEDIA_DIR", "Media"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q does not mention %q", msg, want)
 		}
