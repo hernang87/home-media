@@ -173,9 +173,8 @@ func TestPlayControlAndProgress(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stop hook not called when media finished")
 	}
-	if v, _ := lib.lastSaved(); v[1].(float64) != 100 {
-		t.Errorf("final progress = %v, want the full duration", v)
-	}
+	// The stop hook fires under the session lock; the save follows after it.
+	waitFor(t, func() bool { v, ok := lib.lastSaved(); return ok && v[1].(float64) == 100 })
 }
 
 func TestStopClosesReceiverApp(t *testing.T) {
