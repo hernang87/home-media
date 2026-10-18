@@ -9,14 +9,29 @@ import (
 	"github.com/grandcat/zeroconf"
 )
 
-func TestAdvertiseThenBrowse(t *testing.T) {
-	if testing.Short() {
-		t.Skip("mDNS needs a network")
+func loopback(t *testing.T) []net.Interface {
+	t.Helper()
+	all, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
 	}
+	for _, i := range all {
+		if i.Flags&net.FlagLoopback != 0 && i.Flags&net.FlagUp != 0 && i.Flags&net.FlagMulticast != 0 {
+			return []net.Interface{i}
+		}
+	}
+	t.Fatalf("no multicast-capable loopback interface among %+v", all)
+	return nil
+}
+
+func TestAdvertiseThenBrowse(t *testing.T) {
+	// Loopback keeps the test independent of the host's network: CI runners
+	// have no LAN to multicast on.
+	lo := loopback(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	advErr := make(chan error, 1)
-	go func() { advErr <- Advertise(ctx, "test-server", 18200) }()
+	go func() { advErr <- advertise(ctx, "test-server", 18200, lo) }()
 	time.Sleep(time.Second)
 	select {
 	case err := <-advErr:
@@ -25,7 +40,7 @@ func TestAdvertiseThenBrowse(t *testing.T) {
 		}
 	default:
 	}
-	found, err := Browse(ctx, 3)
+	found, err := browse(ctx, 3, lo)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -25,7 +26,12 @@ type Server struct {
 // Advertise registers a `_homemedia._tcp` service (instance name = name,
 // TXT: version=1) until ctx is cancelled.
 func Advertise(ctx context.Context, name string, port int) error {
-	srv, err := zeroconf.Register(name, Service, "local.", port, []string{"version=1"}, nil)
+	return advertise(ctx, name, port, nil)
+}
+
+// advertise is Advertise on the given interfaces (nil means every multicast interface).
+func advertise(ctx context.Context, name string, port int, ifaces []net.Interface) error {
+	srv, err := zeroconf.Register(name, Service, "local.", port, []string{"version=1"}, ifaces)
 	if err != nil {
 		return err
 	}
@@ -36,7 +42,12 @@ func Advertise(ctx context.Context, name string, port int) error {
 
 // Browse returns servers found within timeout (ctx also cancels).
 func Browse(ctx context.Context, timeoutSeconds int) ([]Server, error) {
-	resolver, err := zeroconf.NewResolver()
+	return browse(ctx, timeoutSeconds, nil)
+}
+
+// browse is Browse on the given interfaces (nil means every multicast interface).
+func browse(ctx context.Context, timeoutSeconds int, ifaces []net.Interface) ([]Server, error) {
+	resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces(ifaces))
 	if err != nil {
 		return nil, err
 	}
