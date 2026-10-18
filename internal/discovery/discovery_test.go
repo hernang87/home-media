@@ -2,59 +2,67 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"net"
+	"slices"
 	"testing"
-	"time"
 
 	"github.com/grandcat/zeroconf"
 )
 
-func loopback(t *testing.T) []net.Interface {
-	t.Helper()
-	all, err := net.Interfaces()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, i := range all {
-		if i.Flags&net.FlagLoopback != 0 && i.Flags&net.FlagUp != 0 && i.Flags&net.FlagMulticast != 0 {
-			return []net.Interface{i}
+func TestCollect(t *testing.T) {
+	entry := func(name string, port int) *zeroconf.ServiceEntry {
+		return &zeroconf.ServiceEntry{
+			ServiceRecord: zeroconf.ServiceRecord{Instance: name, Service: Service, Domain: "local."},
+			HostName:      name + ".local.",
+			Port:          port,
+			AddrIPv4:      []net.IP{net.ParseIP("192.168.1.20")},
 		}
 	}
-	t.Fatalf("no multicast-capable loopback interface among %+v", all)
-	return nil
-}
-
-func TestAdvertiseThenBrowse(t *testing.T) {
-	// Loopback keeps the test independent of the host's network: CI runners
-	// have no LAN to multicast on.
-	lo := loopback(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	advErr := make(chan error, 1)
-	go func() { advErr <- advertise(ctx, "test-server", 18200, lo) }()
-	time.Sleep(time.Second)
-	select {
-	case err := <-advErr:
-		if err != nil {
-			t.Skipf("cannot register mDNS service (sandbox may block multicast): %v", err)
-		}
-	default:
+	tests := []struct {
+		name   string
+		feed   []*zeroconf.ServiceEntry
+		err    error
+		want   []Server
+		wantEr bool
+	}{
+		{name: "none found"},
+		{
+			name: "dedupes by instance",
+			feed: []*zeroconf.ServiceEntry{entry("a", 8200), entry("a", 8200), entry("b", 8201)},
+			want: []Server{
+				{Name: "a", Host: "192.168.1.20", Port: 8200, URL: "http://192.168.1.20:8200"},
+				{Name: "b", Host: "192.168.1.20", Port: 8201, URL: "http://192.168.1.20:8201"},
+			},
+		},
+		{
+			name:   "browse error is returned with partial results",
+			feed:   []*zeroconf.ServiceEntry{entry("a", 8200)},
+			err:    errors.New("boom"),
+			want:   []Server{{Name: "a", Host: "192.168.1.20", Port: 8200, URL: "http://192.168.1.20:8200"}},
+			wantEr: true,
+		},
 	}
-	found, err := browse(ctx, 3, lo)
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			browse := func(ctx context.Context, out chan<- *zeroconf.ServiceEntry) error {
+				for _, e := range tc.feed {
+					out <- e
+				}
+				if tc.err == nil {
+					close(out) // a real browse closes entries when its context ends
+				}
+				return tc.err
+			}
+			got, err := collect(context.Background(), 5, browse)
+			if (err != nil) != tc.wantEr {
+				t.Fatalf("err = %v, want error: %v", err, tc.wantEr)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("collect() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
-	for _, s := range found {
-		if s.Name == "test-server" && s.Port == 18200 {
-			return
-		}
-	}
-	all, _ := net.Interfaces()
-	for _, i := range all {
-		addrs, _ := i.Addrs()
-		t.Logf("iface %s flags=%v addrs=%v", i.Name, i.Flags, addrs)
-	}
-	t.Fatalf("test-server not found among %+v (using %s)", found, lo[0].Name)
 }
 
 func TestServerFromEntry(t *testing.T) {

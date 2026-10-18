@@ -4,7 +4,6 @@ package discovery
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -26,12 +25,7 @@ type Server struct {
 // Advertise registers a `_homemedia._tcp` service (instance name = name,
 // TXT: version=1) until ctx is cancelled.
 func Advertise(ctx context.Context, name string, port int) error {
-	return advertise(ctx, name, port, nil)
-}
-
-// advertise is Advertise on the given interfaces (nil means every multicast interface).
-func advertise(ctx context.Context, name string, port int, ifaces []net.Interface) error {
-	srv, err := zeroconf.Register(name, Service, "local.", port, []string{"version=1"}, ifaces)
+	srv, err := zeroconf.Register(name, Service, "local.", port, []string{"version=1"}, nil)
 	if err != nil {
 		return err
 	}
@@ -42,22 +36,25 @@ func advertise(ctx context.Context, name string, port int, ifaces []net.Interfac
 
 // Browse returns servers found within timeout (ctx also cancels).
 func Browse(ctx context.Context, timeoutSeconds int) ([]Server, error) {
-	return browse(ctx, timeoutSeconds, nil)
-}
-
-// browse is Browse on the given interfaces (nil means every multicast interface).
-func browse(ctx context.Context, timeoutSeconds int, ifaces []net.Interface) ([]Server, error) {
-	resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces(ifaces))
+	resolver, err := zeroconf.NewResolver()
 	if err != nil {
 		return nil, err
 	}
+	return collect(ctx, timeoutSeconds, func(ctx context.Context, entries chan<- *zeroconf.ServiceEntry) error {
+		return resolver.Browse(ctx, Service, "local.", entries)
+	})
+}
 
+// collect runs browse and gathers the distinct servers it reports until the
+// timeout, ctx or browse ends. Split from Browse so tests can feed entries
+// without a multicast network.
+func collect(ctx context.Context, timeoutSeconds int, browse func(context.Context, chan<- *zeroconf.ServiceEntry) error) ([]Server, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
 	entries := make(chan *zeroconf.ServiceEntry)
 	browseErr := make(chan error, 1)
-	go func() { browseErr <- resolver.Browse(ctx, Service, "local.", entries) }()
+	go func() { browseErr <- browse(ctx, entries) }()
 
 	seen := make(map[string]bool)
 	var found []Server
@@ -73,12 +70,18 @@ collect:
 			}
 			seen[e.Instance] = true
 			found = append(found, serverFromEntry(e))
+		case err := <-browseErr:
+			// browse is done, so nothing sends on entries any more.
+			if err != nil && ctx.Err() == nil {
+				return found, err
+			}
+			return found, nil
 		case <-ctx.Done():
 			break collect
 		}
 	}
 
-	// Wait for Browse to return so nothing is still sending on entries.
+	// Wait for browse to return so nothing is still sending on entries.
 	for {
 		select {
 		case <-entries:
