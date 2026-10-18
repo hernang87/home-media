@@ -19,7 +19,7 @@ import (
 	"homemedia/internal/transcode"
 )
 
-// fileTypes is the TYPES table from server.js.
+// fileTypes maps file extensions to the Content-Type served for them.
 var fileTypes = map[string]string{
 	".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json",
 	".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".ico": "image/x-icon",
@@ -48,6 +48,8 @@ func newMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("POST /api/scan", h.scan)
 	mux.HandleFunc("POST /api/progress", h.progress)
 	mux.HandleFunc("GET /api/logs", h.logs)
+	mux.HandleFunc("GET /api/settings", h.settings)
+	mux.HandleFunc("POST /api/settings", h.updateSettings)
 	mux.HandleFunc("GET /art/{id}/{kind}", h.art)
 	mux.HandleFunc("GET /file/{id}", h.file)
 	mux.HandleFunc("GET /hls/{id}/{audio}/index.m3u8", h.playlist)
@@ -75,7 +77,7 @@ func writeText(w http.ResponseWriter, status int, msg string) {
 	_, _ = io.WriteString(w, msg)
 }
 
-// parseDigits accepts only ASCII digits, like the \d+ routes in server.js.
+// parseDigits accepts only ASCII digits.
 func parseDigits(s string) (int, bool) {
 	if !reDigit.MatchString(s) {
 		return 0, false
@@ -108,7 +110,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, f *os.File, fi os.FileInf
 	http.ServeContent(w, r, fi.Name(), fi.ModTime(), f)
 }
 
-// decodeBody reads a JSON body. An empty body decodes to the zero value, as in server.js.
+// decodeBody reads a JSON body. An empty body decodes to the zero value.
 func decodeBody(r *http.Request, v any) error {
 	err := json.NewDecoder(r.Body).Decode(v)
 	if errors.Is(err, io.EOF) {
@@ -118,7 +120,14 @@ func decodeBody(r *http.Request, v any) error {
 }
 
 func (h *handlers) info(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.d.Info)
+	info := h.d.Info
+	if h.d.Addr != nil {
+		info.LAN, info.Base = h.d.Addr()
+	}
+	if h.d.Settings != nil {
+		info.TMDB = h.d.Settings.Settings().TMDBKeySet // the key can change while we run
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (h *handlers) library(w http.ResponseWriter, r *http.Request) {
@@ -211,13 +220,23 @@ func (h *handlers) lookup(id string) (model.Item, bool) {
 	return h.d.Lib.Get(id)
 }
 
+// validAudio reports whether audio names a track of item. An item without
+// audio tracks has one implicit track, 0, when ffmpeg maps "0:a:0?".
+func validAudio(item model.Item, audio int) bool {
+	if len(item.Info.Audio) == 0 {
+		return audio == 0
+	}
+	return audio < len(item.Info.Audio)
+}
+
 func (h *handlers) playlist(w http.ResponseWriter, r *http.Request) {
-	if _, ok := parseDigits(r.PathValue("audio")); !ok {
+	audio, ok := parseDigits(r.PathValue("audio"))
+	if !ok {
 		writeText(w, http.StatusNotFound, "Not found")
 		return
 	}
 	item, ok := h.lookup(r.PathValue("id"))
-	if !ok || item.Info == nil {
+	if !ok || item.Info == nil || !validAudio(item, audio) {
 		writeText(w, http.StatusNotFound, "Not found")
 		return
 	}
@@ -243,7 +262,7 @@ func (h *handlers) segment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, ok := h.lookup(r.PathValue("id"))
-	if !ok || item.Info == nil {
+	if !ok || item.Info == nil || !validAudio(item, audio) || n >= transcode.SegmentCount(item.Info.Duration) {
 		writeText(w, http.StatusNotFound, "Not found")
 		return
 	}

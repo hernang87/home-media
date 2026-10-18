@@ -13,7 +13,8 @@ rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
 echo "Building homemedia-app..."
-go build -o "$CONTENTS/MacOS/homemedia-app" ./cmd/homemedia-app
+# The extldflags hide a harmless "duplicate -lobjc" warning from Fyne's cgo flags.
+go build -ldflags="-extldflags=-Wl,-no_warn_duplicate_libraries" -o "$CONTENTS/MacOS/homemedia-app" ./cmd/homemedia-app
 echo "Building mediad (the app starts it and stops it on quit)..."
 go build -o "$CONTENTS/MacOS/mediad" ./cmd/mediad
 # Where mediad reads .env and keeps data/ (see internal/daemon).

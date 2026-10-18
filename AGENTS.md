@@ -19,7 +19,7 @@ Go media server (module `homemedia`). `mediad` serves a small phone control page
 - `internal/metadata`: TMDB client and artwork cache
 - `internal/library`: folder scan, item cache, watch state, file watching
 - `internal/transcode`: on-demand HLS segments via ffmpeg
-- `internal/api`: HTTP API and media files (`GET /api/logs?after=<seq>` serves the log ring)
+- `internal/api`: HTTP API and media files (`GET /api/logs?after=<seq>` serves the log ring; `/api/settings` reads and writes settings)
 - `internal/logbuf`: in-memory slog ring buffer behind the app's Logs tab
 - `internal/web`: embedded phone page (plain HTML/JS in `static/`, no build step; rebuild `mediad` to pick up edits)
 - `internal/daemon`: the desktop app starts `mediad` when none answers on 127.0.0.1:8200, and stops it on quit
@@ -60,4 +60,7 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 - App-owned `mediad` (child of `homemedia-app`) gets `HOMEMEDIA_PARENT_PID` and exits when that process dies, even on a hard kill. A `mediad` already running (launchd, terminal) is used as-is and never stopped by the app; `bin/mediad uninstall` if you want the app to own it.
 - `mediad` runs `caffeinate -i -w <pid>` so the Mac does not idle-sleep while it is up.
 - Audio-only Cast devices (mDNS `ca` bit 0 unset) are hidden.
+- Settings writes (`POST /api/settings`) are accepted only from loopback or mediad's own addresses. `GET /api/settings` never returns the TMDB key, only `tmdbKeySet`.
+- `.env` is rewritten by `config.UpdateEnvFile` (atomic, mode 0600). It replaces the first occurrence of a key, because `parseDotEnv` is first-wins. Real env vars still override `.env`, and `daemon.Start` always sets `PORT`.
+- TMDB client credentials change at runtime. Use `SetCredentials` and `Credentials`; never assign `APIKey` or `Language` after construction.
 - Never commit `.env`, `data/` or `bin/`.

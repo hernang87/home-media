@@ -115,6 +115,34 @@ func TestMethodsHappyPath(t *testing.T) {
 			wantBody: map[string]any{"id": "ab12", "watched": false},
 		},
 		{
+			name:       "settings",
+			resp:       `{"mediaDir":"/m","tmdbLanguage":"en-US","tmdbKeySet":true,"port":8200,"overridden":[],"restartRequired":false,"editable":true}`,
+			do:         func(c *Client) error { _, err := c.Settings(ctx); return err },
+			wantMethod: http.MethodGet, wantPath: "/api/settings", wantNoBody: true,
+		},
+		{
+			name: "save settings sends only the set fields",
+			resp: `{"mediaDir":"/m","tmdbLanguage":"es-AR","tmdbKeySet":true,"editable":true}`,
+			do: func(c *Client) error {
+				lang := "es-AR"
+				_, err := c.SaveSettings(ctx, SettingsUpdate{TMDBLanguage: &lang})
+				return err
+			},
+			wantMethod: http.MethodPost, wantPath: "/api/settings", wantCT: "application/json",
+			wantBody: map[string]any{"tmdbLanguage": "es-AR"},
+		},
+		{
+			name: "save settings can send an empty key to remove it",
+			resp: `{"tmdbKeySet":false}`,
+			do: func(c *Client) error {
+				empty := ""
+				_, err := c.SaveSettings(ctx, SettingsUpdate{TMDBKey: &empty})
+				return err
+			},
+			wantMethod: http.MethodPost, wantPath: "/api/settings", wantCT: "application/json",
+			wantBody: map[string]any{"tmdbKey": ""},
+		},
+		{
 			name:       "devices",
 			resp:       `[{"id":"d1","name":"Living Room TV","model":"Chromecast","addr":"10.0.0.5","port":8009}]`,
 			do:         func(c *Client) error { _, err := c.Devices(ctx); return err },

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -71,6 +72,12 @@ func run(logs *logbuf.Buffer) error {
 
 	meta := &metadata.Client{APIKey: cfg.TMDBAPIKey, Language: cfg.TMDBLanguage}
 	lib := library.New(cfg, meta)
+	settings := &settingsStore{
+		envPath: config.EnvFile, port: cfg.Port, mediaDir: cfg.MediaDir, meta: meta,
+		check:  meta.Check,
+		rescan: func(refresh bool) { go func() { _ = lib.Scan(ctx, refresh) }() },
+		lookup: os.LookupEnv,
+	}
 	tx, err := transcode.NewManager(cfg.TmpDir)
 	if err != nil {
 		return err
@@ -81,6 +88,12 @@ func run(logs *logbuf.Buffer) error {
 	base := fmt.Sprintf("http://%s:%d", lan, cfg.Port)
 	caster := cast.NewManager(lib, base)
 	caster.StopHook = tx.StopItem
+	addr := &atomic.Pointer[[2]string]{} // lan, base; changes when the Mac moves networks
+	addr.Store(&[2]string{lan, base})
+	go watchLAN(ctx, cfg.Port, 30*time.Second, lan, config.LANAddress, func(lan, base string) {
+		addr.Store(&[2]string{lan, base})
+		caster.SetBase(base)
+	})
 	handler := api.New(api.Deps{
 		Config: cfg, Lib: lib, TX: tx,
 		Info: api.Info{Name: cfg.ServerName, LAN: lan, Port: cfg.Port, Base: base, TMDB: meta.Enabled(), Version: version},
@@ -88,7 +101,9 @@ func run(logs *logbuf.Buffer) error {
 			caster.Routes(mux)
 			web.Routes(mux)
 		},
-		Logs: logs,
+		Addr:     func() (string, string) { a := addr.Load(); return a[0], a[1] },
+		Logs:     logs,
+		Settings: settings,
 	})
 	srv := &http.Server{Addr: fmt.Sprintf("0.0.0.0:%d", cfg.Port), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 

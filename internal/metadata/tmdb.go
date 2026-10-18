@@ -1,5 +1,4 @@
 // Package metadata talks to TMDB and caches artwork.
-// Port of lib/tmdb.js (node-ref).
 package metadata
 
 import (
@@ -14,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"homemedia/internal/model"
@@ -30,16 +30,47 @@ const (
 
 // Client is a TMDB client. APIKey may be a v3 key (32 hex chars, sent as
 // api_key) or a v4 read token (starts with "ey", sent as Bearer).
+//
+// APIKey and Language are read when the client is built; to change them while
+// requests are in flight, use SetCredentials.
 type Client struct {
 	APIKey   string
 	Language string       // e.g. "en-US"
 	HTTP     *http.Client // nil = 15 s timeout default
 	APIBase  string       // default https://api.themoviedb.org/3; overridable for tests
 	ImgBase  string       // default https://image.tmdb.org/t/p
+
+	mu sync.RWMutex // guards APIKey and Language after construction
+}
+
+// SetCredentials replaces the API key and language; it is safe to call while
+// lookups are running. An empty language keeps the default.
+func (c *Client) SetCredentials(apiKey, language string) {
+	c.mu.Lock()
+	c.APIKey, c.Language = apiKey, language
+	c.mu.Unlock()
+}
+
+// Credentials returns the current API key and language ("" if unset).
+func (c *Client) Credentials() (apiKey, language string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.APIKey, c.Language
 }
 
 // Enabled reports whether an API key is configured.
-func (c *Client) Enabled() bool { return c.APIKey != "" }
+func (c *Client) Enabled() bool {
+	key, _ := c.Credentials()
+	return key != ""
+}
+
+// Check asks TMDB whether apiKey is accepted, without touching c's own
+// credentials. It returns an error that never contains the key.
+func (c *Client) Check(ctx context.Context, apiKey string) error {
+	probe := &Client{APIKey: apiKey, Language: defaultLanguage, HTTP: c.HTTP, APIBase: c.APIBase, ImgBase: c.ImgBase}
+	var out struct{}
+	return probe.getJSON(ctx, "/configuration", nil, &out)
+}
 
 // LookupMovie searches by title/year (retrying without year when empty),
 // picks the best match by release year (+-1 allowed), then loads details and credits.
@@ -191,8 +222,8 @@ func (c *Client) imgBase() string {
 }
 
 func (c *Client) language() string {
-	if c.Language != "" {
-		return c.Language
+	if _, lang := c.Credentials(); lang != "" {
+		return lang
 	}
 	return defaultLanguage
 }
@@ -213,10 +244,11 @@ func (c *Client) getJSON(ctx context.Context, route string, params url.Values, o
 	}
 	q.Set("language", c.language())
 	headers := http.Header{"Accept": {"application/json"}}
-	if strings.HasPrefix(c.APIKey, "ey") {
-		headers.Set("Authorization", "Bearer "+c.APIKey)
+	apiKey, _ := c.Credentials()
+	if strings.HasPrefix(apiKey, "ey") {
+		headers.Set("Authorization", "Bearer "+apiKey)
 	} else {
-		q.Set("api_key", c.APIKey)
+		q.Set("api_key", apiKey)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase()+route+"?"+q.Encode(), nil)
 	if err != nil {

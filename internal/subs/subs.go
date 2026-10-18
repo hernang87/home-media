@@ -1,5 +1,4 @@
 // Package subs names subtitle tracks and converts them to WebVTT.
-// Port of lib/subs.js (node-ref).
 package subs
 
 import (

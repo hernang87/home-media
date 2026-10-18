@@ -17,38 +17,29 @@ import (
 	"homemedia/internal/model"
 )
 
-// Info is the response of GET /api/info.
-type Info struct {
-	Name    string `json:"name"`
-	LAN     string `json:"lan"`
-	Port    int    `json:"port"`
-	Base    string `json:"base"`
-	TMDB    bool   `json:"tmdb"`
-	Version string `json:"version"`
+// Info, Device and CastStatus are the wire types shared with mediad.
+type (
+	Info       = model.ServerInfo
+	Device     = model.Device
+	CastStatus = model.CastStatus
+)
+
+// Settings is the response of GET /api/settings.
+type Settings struct {
+	MediaDir        string   `json:"mediaDir"`
+	TMDBLanguage    string   `json:"tmdbLanguage"`
+	TMDBKeySet      bool     `json:"tmdbKeySet"`
+	Port            int      `json:"port"`
+	Overridden      []string `json:"overridden"`      // .env names that mediad's environment overrides
+	RestartRequired bool     `json:"restartRequired"` // a saved change waits for a restart
+	Editable        bool     `json:"editable"`        // this caller may POST
 }
 
-// Device is a Chromecast listed by GET /api/cast/devices.
-type Device struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Model string `json:"model"`
-	Addr  string `json:"addr"`
-	Port  int    `json:"port"`
-}
-
-// CastStatus is the response of GET /api/cast/{device}/status.
-type CastStatus struct {
-	State      string  `json:"state"` // DISCONNECTED | IDLE | LOADING | PLAYING | PAUSED | BUFFERING
-	Position   float64 `json:"position"`
-	Duration   float64 `json:"duration"`
-	ItemID     string  `json:"itemId"`
-	Audio      int     `json:"audio"`
-	Sub        string  `json:"sub"` // sub track id, "" = off
-	Mode       string  `json:"mode"`
-	Volume     float64 `json:"volume"`
-	Muted      bool    `json:"muted"`
-	IdleReason string  `json:"idleReason,omitempty"`
-	Error      string  `json:"error,omitempty"`
+// SettingsUpdate is the body of POST /api/settings. A nil field is left alone.
+type SettingsUpdate struct {
+	MediaDir     *string `json:"mediaDir,omitempty"`
+	TMDBLanguage *string `json:"tmdbLanguage,omitempty"`
+	TMDBKey      *string `json:"tmdbKey,omitempty"`
 }
 
 // PlayRequest is the body of POST /api/cast/{device}/play.
@@ -69,7 +60,7 @@ type ResumeError struct {
 }
 
 func (e *ResumeError) Error() string {
-	return fmt.Sprintf("already watched up to %s (choose continue or restart)", clock(e.Position))
+	return fmt.Sprintf("already watched up to %s (choose continue or restart)", model.Clock(e.Position))
 }
 
 // APIError is a non-2xx answer carrying the server's {"error": "..."} text.
@@ -93,6 +84,7 @@ const (
 	timeoutShort = 3 * time.Second
 	timeoutPlay  = 60 * time.Second
 	timeoutStd   = 15 * time.Second
+	timeoutSave  = 20 * time.Second
 )
 
 // New returns a client for base (a trailing slash is trimmed).
@@ -143,6 +135,20 @@ func (c *Client) FetchArt(ctx context.Context, rel *string) ([]byte, error) {
 func (c *Client) Info(ctx context.Context) (Info, error) {
 	var out Info
 	err := c.call(ctx, timeoutStd, http.MethodGet, "/api/info", nil, &out)
+	return out, err
+}
+
+func (c *Client) Settings(ctx context.Context) (Settings, error) {
+	var out Settings
+	err := c.call(ctx, timeoutStd, http.MethodGet, "/api/settings", nil, &out)
+	return out, err
+}
+
+// SaveSettings applies u and returns the settings as they are afterwards. The
+// server checks a new TMDB key with TMDB first, so allow it the longer timeout.
+func (c *Client) SaveSettings(ctx context.Context, u SettingsUpdate) (Settings, error) {
+	var out Settings
+	err := c.call(ctx, timeoutSave, http.MethodPost, "/api/settings", u, &out)
 	return out, err
 }
 
@@ -312,17 +318,4 @@ func apiError(status int, data []byte) *APIError {
 		msg = http.StatusText(status)
 	}
 	return &APIError{Status: status, Message: msg}
-}
-
-// clock formats seconds as m:ss, or h:mm:ss from one hour on.
-func clock(sec float64) string {
-	if sec < 0 {
-		sec = 0
-	}
-	total := int(sec)
-	h, m, s := total/3600, (total%3600)/60, total%60
-	if h > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
-	}
-	return fmt.Sprintf("%d:%02d", m, s)
 }

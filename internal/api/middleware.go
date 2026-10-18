@@ -43,7 +43,22 @@ func (w *statusWriter) ReadFrom(r io.Reader) (int64, error) {
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// requestLog logs every request at debug level.
+// requestLevel is the log level of a request: what the TV fetches is worth
+// seeing in the log view, but a direct play's Range requests are noise.
+func requestLevel(r *http.Request) slog.Level {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/file/"):
+		if rg := r.Header.Get("Range"); rg == "" || strings.HasPrefix(rg, "bytes=0-") {
+			return slog.LevelInfo
+		}
+	case strings.HasPrefix(p, "/sub/"), strings.HasSuffix(p, "/index.m3u8"):
+		return slog.LevelInfo
+	}
+	return slog.LevelDebug
+}
+
+// requestLog logs every request at debug level, or info for the requests in requestLevel.
 func requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusWriter{ResponseWriter: w}
@@ -52,11 +67,7 @@ func requestLog(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		level := slog.LevelDebug
-		if p := r.URL.Path; strings.HasPrefix(p, "/file/") || strings.HasPrefix(p, "/sub/") || strings.HasSuffix(p, "/index.m3u8") {
-			level = slog.LevelInfo // what the TV fetches is worth seeing in the log view
-		}
-		slog.Log(r.Context(), level, "http request",
+		slog.Log(r.Context(), requestLevel(r), "http request",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -144,14 +155,17 @@ func localHostName(hostport string) bool {
 	return false
 }
 
-// cors mirrors server.js cors(), and answers preflight requests with 204.
+// cors allows cross-origin reads of the media routes (the Chromecast receiver
+// needs them) and answers preflight requests with 204. /api/ gets no CORS headers: apiGuard keeps it same-origin.
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("Access-Control-Allow-Origin", "*")
-		h.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "Range, Content-Type")
-		h.Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", "*")
+			h.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Range, Content-Type")
+			h.Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

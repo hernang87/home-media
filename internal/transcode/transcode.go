@@ -1,5 +1,5 @@
 // Package transcode produces HLS segments on demand with ffmpeg.
-// Port of lib/transcode.js (node-ref): one ffmpeg per (item, audio track),
+// One ffmpeg per (item, audio track),
 // restarted at the requested segment on seeks, throttled when far ahead of the
 // player and evicted when idle.
 package transcode
@@ -34,9 +34,11 @@ const (
 	ahead = 8
 	// maxBuffer stops ffmpeg when it is this many segments past the last request.
 	maxBuffer = 30
-	idleTime  = 10 * time.Minute
-	pollEvery = 100 * time.Millisecond
-	waitMax   = 90 * time.Second
+	// keepBehind is how many segments behind the playhead are kept, so a short rewind needs no ffmpeg restart.
+	keepBehind = 20
+	idleTime   = 10 * time.Minute
+	pollEvery  = 100 * time.Millisecond
+	waitMax    = 90 * time.Second
 )
 
 var segFileRe = regexp.MustCompile(`^seg(\d+)\.ts$`)
@@ -155,21 +157,49 @@ func ffmpegArgs(item model.Item, audio, seg int, hw bool, dir string) []string {
 	return args
 }
 
-// producedMax returns the highest finished segment number in the session dir, or -1.
-func (s *session) producedMax() int {
+// segNames returns the file names in the session dir, or nil.
+func (s *session) segNames() []string {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return -1
+		return nil
 	}
-	max := -1
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if m := segFileRe.FindStringSubmatch(e.Name()); m != nil {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// maxSegment returns the highest finished segment number in names, or -1.
+func maxSegment(names []string) int {
+	max := -1
+	for _, name := range names {
+		if m := segFileRe.FindStringSubmatch(name); m != nil {
 			if n, _ := strconv.Atoi(m[1]); n > max {
 				max = n
 			}
 		}
 	}
 	return max
+}
+
+// staleSegments returns the segment names in names more than keepBehind
+// segments behind lastReq.
+func staleSegments(names []string, lastReq, keepBehind int) []string {
+	var stale []string
+	for _, name := range names {
+		if m := segFileRe.FindStringSubmatch(name); m != nil {
+			if n, _ := strconv.Atoi(m[1]); n < lastReq-keepBehind {
+				stale = append(stale, name)
+			}
+		}
+	}
+	return stale
+}
+
+// producedMax returns the highest finished segment number in the session dir, or -1.
+func (s *session) producedMax() int {
+	return maxSegment(s.segNames())
 }
 
 // killLocked stops the running ffmpeg and its children. s.mu must be held.
@@ -334,8 +364,15 @@ func (m *Manager) janitor() {
 				s.killLocked()
 				_ = os.RemoveAll(s.dir)
 				delete(m.sessions, key)
-			case s.proc != nil && s.producedMax()-s.lastReq > maxBuffer:
-				s.killLocked()
+			default:
+				names := s.segNames()
+				if s.proc != nil && maxSegment(names)-s.lastReq > maxBuffer {
+					s.killLocked()
+				}
+				// Old segments are only needed again after a long rewind; Segment restarts ffmpeg for those.
+				for _, name := range staleSegments(names, s.lastReq, keepBehind) {
+					_ = os.Remove(filepath.Join(s.dir, name))
+				}
 			}
 			s.mu.Unlock()
 		}

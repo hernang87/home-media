@@ -24,25 +24,14 @@ const (
 )
 
 // Status is what clients see for a device.
-type Status struct {
-	State      string  `json:"state"` // DISCONNECTED | IDLE | LOADING | PLAYING | PAUSED | BUFFERING
-	Position   float64 `json:"position"`
-	Duration   float64 `json:"duration"`
-	ItemID     string  `json:"itemId"`
-	Audio      int     `json:"audio"`
-	Sub        string  `json:"sub"` // sub track id, "" = off
-	Mode       string  `json:"mode"`
-	Volume     float64 `json:"volume"`
-	Muted      bool    `json:"muted"`
-	IdleReason string  `json:"idleReason,omitempty"`
-	Error      string  `json:"error,omitempty"`
-}
+type Status = model.CastStatus
 
 type session struct {
-	m   *Manager
-	dev Device
+	m      *Manager
+	dialMu sync.Mutex // serializes connect
 
 	mu          sync.Mutex
+	dev         Device // guarded by mu
 	c           *conn
 	changed     chan struct{} // closed and replaced on every state change
 	transportID string
@@ -59,6 +48,13 @@ type session struct {
 
 func newSession(m *Manager, dev Device) *session {
 	return &session{m: m, dev: dev, changed: make(chan struct{}), st: Status{State: "DISCONNECTED"}}
+}
+
+// device returns the device record; its address can change between connects.
+func (s *session) device() Device {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dev
 }
 
 func (s *session) notifyLocked() {
@@ -90,28 +86,40 @@ func (s *session) waitFor(ctx context.Context, timeout time.Duration, cond func(
 
 // ensure connects (if needed) and makes sure the Default Media Receiver runs.
 func (s *session) ensure(ctx context.Context) error {
-	s.mu.Lock()
-	c := s.c
-	s.mu.Unlock()
-	if c == nil {
-		nc, err := dial(s.dev.Addr, s.dev.Port, 5*time.Second)
-		if err != nil {
-			return err
-		}
-		s.mu.Lock()
-		s.c, s.lastRx = nc, time.Now()
-		s.st.State = "IDLE"
-		s.mu.Unlock()
-		in := make(chan message, 16)
-		go nc.readLoop(in)
-		go s.dispatch(nc, in)
-		go s.heartbeat(nc)
-		if _, err := nc.send(nsConnection, receiverID, map[string]any{"type": "CONNECT"}); err != nil {
-			s.drop(nc)
-			return err
-		}
+	if err := s.connect(); err != nil {
+		return err
 	}
 	return s.ensureApp(ctx)
+}
+
+// connect dials the device unless a connection exists. dialMu makes concurrent
+// callers share one dial instead of leaking the connection that loses the race.
+func (s *session) connect() error {
+	s.dialMu.Lock()
+	defer s.dialMu.Unlock()
+	s.mu.Lock()
+	c, dev := s.c, s.dev
+	s.mu.Unlock()
+	if c != nil {
+		return nil
+	}
+	nc, err := dial(dev.Addr, dev.Port, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.c, s.lastRx = nc, time.Now()
+	s.st.State = "IDLE"
+	s.mu.Unlock()
+	in := make(chan message, 16)
+	go nc.readLoop(in)
+	go s.dispatch(nc, in)
+	go s.heartbeat(nc)
+	if _, err := nc.send(nsConnection, receiverID, map[string]any{"type": "CONNECT"}); err != nil {
+		s.drop(nc)
+		return err
+	}
+	return nil
 }
 
 func (s *session) hasApp() bool { return s.transportID != "" }
@@ -164,7 +172,7 @@ func (s *session) heartbeat(c *conn) {
 			return
 		}
 		if dead {
-			slog.Warn("chromecast stopped answering", "device", s.dev.Name)
+			slog.Warn("chromecast stopped answering", "device", s.device().Name)
 			s.drop(c)
 			return
 		}
@@ -514,7 +522,7 @@ func (s *session) control(ctx context.Context, req ControlRequest) error {
 			return nil
 		}
 		st := s.status()
-		return s.m.Play(ctx, s.dev.ID, PlayRequest{ItemID: itemID, Audio: int(v), Sub: st.Sub, Start: st.Position, Mode: "transcode", Resume: "restart"})
+		return s.m.Play(ctx, s.device().ID, PlayRequest{ItemID: itemID, Audio: int(v), Sub: st.Sub, Start: st.Position, Mode: "transcode", Resume: "restart"})
 	}
 	return badRequest("unknown action %q", req.Action)
 }

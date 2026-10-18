@@ -146,75 +146,164 @@ function render() {
 
 // ---- remote ----
 
+// While the user drags the seek slider, polls must not move its thumb.
+// seeking is cleared on change, on pointer/touch end or cancel, on blur,
+// and by a safety timeout so a lost change event cannot freeze the UI.
 let seeking = false;
+let seekTimer = 0;
+
+function setSeeking(on) {
+  clearTimeout(seekTimer);
+  seeking = on;
+  if (on) seekTimer = setTimeout(() => { seeking = false; }, 5000);
+}
+
+// The Remote view is built once per playing item and device, then updated in place on each poll.
+let remoteKey = "";
+let remoteRoot = null; // top element mounted in view
+let remoteRefs = null; // nodes updated on each poll (only while the playing view is shown)
+
+const isPlayingState = (s) => s.state === "PLAYING" || s.state === "BUFFERING";
+
+function seekBy(delta) {
+  const s = state.status;
+  if (s) control("seek", Math.max(0, s.position + delta));
+}
+
+function togglePlay() {
+  const s = state.status;
+  if (s) control(isPlayingState(s) ? "pause" : "resume");
+}
+
+function toggleMute() {
+  const s = state.status;
+  if (s) control("mute", !s.muted);
+}
 
 function renderRemote() {
-  // Don't rebuild the controls while a finger is on a slider.
-  // (also while a picker is open: rebuilding it would close the dropdown)
-  const active = document.activeElement;
-  if (seeking || (active && view.contains(active) && (active.tagName === "SELECT" || active.tagName === "INPUT"))) return;
-  const st = state.status;
   const dev = currentDevice();
-  if (!dev) {
-    mount(h("div", { class: "empty" }, "No Chromecast found yet.", h("br"), "Make sure the TV is on and on this Wi-Fi."));
-    return;
-  }
-  const playing = st && st.itemId && !["IDLE", "DISCONNECTED", ""].includes(st.state);
+  const st = state.status;
+  const playing = !!dev && !!st && !!st.itemId && !["IDLE", "DISCONNECTED", ""].includes(st.state);
+
   if (!playing) {
+    const key = !dev ? "nodev" : `idle:${dev.name}:${state.statusErr}`;
+    if (key === remoteKey && remoteRoot && remoteRoot.parentNode === view) return;
+    remoteKey = key;
+    remoteRefs = null;
+    if (!dev) {
+      remoteRoot = h("div", { class: "empty" }, "No Chromecast found yet.", h("br"), "Make sure the TV is on and on this Wi-Fi.");
+      mount(remoteRoot);
+      return;
+    }
     const msg = state.statusErr ? `Can't reach ${dev.name}: ${state.statusErr}` : `Nothing playing on ${dev.name}.`;
+    remoteRoot = h("div", { class: "empty" }, msg);
     mount(
-      h("div", { class: "empty" }, msg),
+      remoteRoot,
       h("div", { class: "btns" }, h("button", { class: "btn primary", onclick: () => setTab("library") }, "Pick something to play")),
     );
     return;
   }
+
   const it = state.items.get(st.itemId);
-  const isPlaying = st.state === "PLAYING" || st.state === "BUFFERING";
-  const art = it && (it.backdrop || it.poster);
-  const send = (action, value) => control(action, value);
+  const sig = it ? `${it.audio.map((a) => a.index).join(",")}|${it.subs.map((s) => s.id).join(",")}` : "none";
+  const key = `play:${dev.id}:${st.itemId}:${sig}`;
+  if (key !== remoteKey || !remoteRefs || remoteRoot.parentNode !== view) buildRemote(key, it, dev);
+  updateRemote(st, it, dev);
+}
 
-  const seek = h("input", {
-    class: "seek", type: "range", min: 0, max: Math.max(1, Math.floor(st.duration)), step: 1, value: Math.floor(st.position),
-    oninput: (e) => { seeking = true; cur.textContent = clock(e.target.value); },
-    onchange: (e) => { seeking = false; send("seek", Number(e.target.value)); },
-  });
-  const cur = h("span", null, clock(st.position));
-  const subs = it ? it.subs : [];
+function buildRemote(key, it, dev) {
+  setSeeking(false);
   const audio = it ? it.audio : [];
+  const subs = it ? it.subs : [];
+  const r = {};
+  r.art = h("div", { class: "art" });
+  r.artCss = null;
+  r.title = h("h3", null);
+  r.dim = h("div", { class: "dim" });
+  r.cur = h("span", null);
+  r.dur = h("span", null);
+  r.seek = h("input", {
+    class: "seek", type: "range", min: 0, step: 1,
+    oninput: (e) => { setSeeking(true); r.cur.textContent = clock(e.target.value); },
+    onchange: (e) => { setSeeking(false); control("seek", Number(e.target.value)); },
+    onpointerup: () => setSeeking(false),
+    onpointercancel: () => setSeeking(false),
+    ontouchend: () => setSeeking(false),
+    ontouchcancel: () => setSeeking(false),
+    onblur: () => setSeeking(false),
+  });
+  r.play = h("button", { class: "btn primary big", onclick: togglePlay });
+  r.volume = h("input", { type: "range", min: 0, max: 100, onchange: (e) => control("volume", Number(e.target.value) / 100) });
+  r.mute = h("button", { class: "btn", onclick: toggleMute });
+  r.audio = audio.length > 1
+    ? h("select", { onchange: (e) => control("audio", Number(e.target.value)) },
+      audio.map((a) => h("option", { value: a.index }, audioLabel(a))))
+    : null;
+  r.sub = subs.length > 0
+    ? h("select", { onchange: (e) => control("sub", e.target.value) },
+      h("option", { value: "" }, "Off"),
+      subs.map((s) => h("option", { value: s.id }, s.label || s.lang || s.id)))
+    : null;
+  const seekButton = (delta, label) => h("button", { class: "btn", onclick: () => seekBy(delta) }, label);
 
-  mount(h("div", { class: "now" },
-    h("div", { class: "art", style: art ? `background-image:url("${art}")` : "" }),
+  const root = h("div", { class: "now" },
+    r.art,
     h("div", { class: "body" },
-      h("h3", null, itemTitle(it) || "Playing"),
-      h("div", { class: "dim" }, `${st.state.toLowerCase()} on ${dev.name}${st.mode ? " · " + st.mode : ""}`),
-      seek,
-      h("div", { class: "times" }, cur, h("span", null, clock(st.duration))),
+      r.title,
+      r.dim,
+      r.seek,
+      h("div", { class: "times" }, r.cur, r.dur),
       h("div", { class: "transport" },
-        h("button", { class: "btn", onclick: () => send("seek", Math.max(0, st.position - 30)) }, "−30"),
-        h("button", { class: "btn", onclick: () => send("seek", Math.max(0, st.position - 10)) }, "−10"),
-        h("button", { class: "btn primary big", onclick: () => send(isPlaying ? "pause" : "resume") }, isPlaying ? "❚❚" : "▶"),
-        h("button", { class: "btn", onclick: () => send("seek", st.position + 10) }, "+10"),
-        h("button", { class: "btn", onclick: () => send("seek", st.position + 30) }, "+30"),
+        seekButton(-30, "−30"),
+        seekButton(-10, "−10"),
+        r.play,
+        seekButton(10, "+10"),
+        seekButton(30, "+30"),
       ),
       h("div", { class: "row" },
         h("label", null, "Volume"),
-        h("input", { type: "range", min: 0, max: 100, value: Math.round((st.volume || 0) * 100), onchange: (e) => send("volume", Number(e.target.value) / 100) }),
-        h("button", { class: "btn", onclick: () => send("mute", !st.muted) }, st.muted ? "Unmute" : "Mute"),
+        r.volume,
+        r.mute,
       ),
-      audio.length > 1 && h("div", { class: "row" },
-        h("label", null, "Audio"),
-        h("select", { onchange: (e) => send("audio", Number(e.target.value)) },
-          audio.map((a) => h("option", { value: a.index, selected: a.index === st.audio }, audioLabel(a)))),
-      ),
-      subs.length > 0 && h("div", { class: "row" },
-        h("label", null, "Subs"),
-        h("select", { onchange: (e) => send("sub", e.target.value) },
-          h("option", { value: "" }, "Off"),
-          subs.map((s) => h("option", { value: s.id, selected: s.id === st.sub }, s.label || s.lang || s.id))),
-      ),
+      r.audio && h("div", { class: "row" }, h("label", null, "Audio"), r.audio),
+      r.sub && h("div", { class: "row" }, h("label", null, "Subs"), r.sub),
       h("div", { class: "btns" }, h("button", { class: "btn danger", onclick: () => control("stop") }, "Stop")),
     ),
-  ));
+  );
+  remoteKey = key;
+  remoteRoot = root;
+  remoteRefs = r;
+  mount(root);
+}
+
+// updateRemote writes the latest status into the existing nodes.
+// Controls the user is touching or has focused keep their current value.
+function updateRemote(st, it, dev) {
+  const r = remoteRefs;
+  const art = it && (it.backdrop || it.poster);
+  const artCss = art ? `background-image:url("${art}")` : "";
+  if (r.artCss !== artCss) {
+    r.artCss = artCss;
+    r.art.style.cssText = artCss;
+  }
+  r.title.textContent = itemTitle(it) || "Playing";
+  r.dim.textContent = `${st.state.toLowerCase()} on ${dev.name}${st.mode ? " · " + st.mode : ""}`;
+  if (!seeking) {
+    const max = String(Math.max(1, Math.floor(st.duration)));
+    if (r.seek.max !== max) r.seek.max = max;
+    r.seek.value = Math.floor(st.position || 0);
+    r.cur.textContent = clock(st.position);
+  }
+  r.dur.textContent = clock(st.duration);
+  r.play.textContent = isPlayingState(st) ? "❚❚" : "▶";
+  if (document.activeElement !== r.volume) r.volume.value = Math.round((st.volume || 0) * 100);
+  r.mute.textContent = st.muted ? "Unmute" : "Mute";
+  if (r.audio && st.audio != null && document.activeElement !== r.audio) r.audio.value = String(st.audio);
+  if (r.sub && document.activeElement !== r.sub) {
+    const want = st.sub || "";
+    r.sub.value = want;
+    if (r.sub.value !== want) r.sub.value = "";
+  }
 }
 
 function audioLabel(a) {

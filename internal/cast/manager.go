@@ -19,13 +19,7 @@ import (
 )
 
 // Device is a Chromecast found on the network.
-type Device struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Model string `json:"model"`
-	Addr  string `json:"addr"`
-	Port  int    `json:"port"`
-}
+type Device = model.Device
 
 // Library is what the cast manager needs from internal/library.
 type Library interface {
@@ -39,13 +33,13 @@ const minResume = 30
 
 // Manager owns device discovery and one session per device.
 type Manager struct {
-	lib  Library
-	base string // http://<lan>:<port>, how the Chromecast reaches this server
+	lib Library
 	// StopHook is called when playback of an item ends (finished or stopped) so
 	// transcoding can be stopped. May be nil.
 	StopHook func(itemID string)
 
 	mu       sync.Mutex
+	base     string // http://<lan>:<port>, how the Chromecast reaches this server; guarded by mu
 	devices  map[string]*deviceEntry
 	sessions map[string]*session
 }
@@ -58,6 +52,20 @@ type deviceEntry struct {
 // NewManager creates a manager. base must use the LAN address, never localhost.
 func NewManager(lib Library, base string) *Manager {
 	return &Manager{lib: lib, base: strings.TrimRight(base, "/"), devices: map[string]*deviceEntry{}, sessions: map[string]*session{}}
+}
+
+// SetBase changes the URL Chromecasts use to reach this server, for when the
+// machine's LAN address changes while mediad runs.
+func (m *Manager) SetBase(base string) {
+	m.mu.Lock()
+	m.base = strings.TrimRight(base, "/")
+	m.mu.Unlock()
+}
+
+func (m *Manager) baseURL() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.base
 }
 
 func (m *Manager) onStop(itemID string) {
@@ -200,8 +208,12 @@ func (m *Manager) sessionFor(dev Device) *session {
 	if s == nil {
 		s = newSession(m, dev)
 		m.sessions[dev.ID] = s
-	} else if s.dev.Addr != dev.Addr || s.dev.Port != dev.Port {
-		s.dev = dev // the device changed address; the next connect uses it
+	} else {
+		s.mu.Lock()
+		if s.dev.Addr != dev.Addr || s.dev.Port != dev.Port {
+			s.dev = dev // the device changed address; the next connect uses it
+		}
+		s.mu.Unlock()
 	}
 	return s
 }
@@ -226,16 +238,7 @@ type ResumeError struct {
 }
 
 func (e *ResumeError) Error() string {
-	return fmt.Sprintf("already watched up to %s: choose resume=continue or resume=restart", clock(e.Position))
-}
-
-// clock formats seconds as h:mm:ss or m:ss.
-func clock(sec float64) string {
-	s := int(sec)
-	if s >= 3600 {
-		return fmt.Sprintf("%d:%02d:%02d", s/3600, s%3600/60, s%60)
-	}
-	return fmt.Sprintf("%d:%02d", s/60, s%60)
+	return fmt.Sprintf("already watched up to %s: choose resume=continue or resume=restart", model.Clock(e.Position))
 }
 
 // loadSpec is a fully built LOAD plus what the session must remember about it.
@@ -266,14 +269,15 @@ func (m *Manager) BuildLoad(item model.Item, deviceModel string, req PlayRequest
 	default:
 		mode = "auto"
 	}
+	base := m.baseURL()
 	var url, ctype string
 	if direct {
-		url, ctype, mode = fmt.Sprintf("%s/file/%s", m.base, item.ID), contentTypeForFile(item.Path), "direct"
+		url, ctype, mode = fmt.Sprintf("%s/file/%s", base, item.ID), contentTypeForFile(item.Path), "direct"
 	} else {
 		if req.Audio < 0 || (len(item.Info.Audio) > 0 && req.Audio >= len(item.Info.Audio)) {
 			return loadSpec{}, badRequest("audio track %d does not exist", req.Audio)
 		}
-		url, ctype, mode = fmt.Sprintf("%s/hls/%s/%d/index.m3u8", m.base, item.ID, req.Audio), "application/x-mpegURL", "transcode"
+		url, ctype, mode = fmt.Sprintf("%s/hls/%s/%d/index.m3u8", base, item.ID, req.Audio), "application/x-mpegURL", "transcode"
 	}
 
 	spec := loadSpec{trackSubs: map[int]string{}, audio: req.Audio, mode: mode, start: req.Start, duration: item.Info.Duration}
@@ -287,7 +291,7 @@ func (m *Manager) BuildLoad(item model.Item, deviceModel string, req PlayRequest
 		spec.trackSubs[tid] = sub.ID
 		t := map[string]any{
 			"trackId": tid, "type": "TEXT", "subtype": "SUBTITLES",
-			"trackContentId":   fmt.Sprintf("%s/sub/%s/%s.vtt", m.base, item.ID, sub.ID),
+			"trackContentId":   fmt.Sprintf("%s/sub/%s/%s.vtt", base, item.ID, sub.ID),
 			"trackContentType": "text/vtt", "name": sub.Label,
 		}
 		if sub.Lang != "" {
@@ -305,7 +309,7 @@ func (m *Manager) BuildLoad(item model.Item, deviceModel string, req PlayRequest
 
 	meta := map[string]any{"metadataType": 0, "title": titleFor(item)}
 	if item.Art.Backdrop {
-		meta["images"] = []map[string]any{{"url": fmt.Sprintf("%s/art/%s/backdrop", m.base, item.ID)}}
+		meta["images"] = []map[string]any{{"url": fmt.Sprintf("%s/art/%s/backdrop", base, item.ID)}}
 	}
 	media := map[string]any{
 		"contentId": url, "contentType": ctype, "streamType": "BUFFERED",

@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,6 +33,7 @@ type fakeDevice struct {
 	media    map[string]any
 	mediaID  int // a new mediaSessionId per LOAD, like a real receiver
 	conns    []net.Conn
+	accepted atomic.Int32 // connections accepted so far
 }
 
 func newFakeDevice(t *testing.T) *fakeDevice {
@@ -58,6 +60,7 @@ func (d *fakeDevice) serve() {
 		if err != nil {
 			return
 		}
+		d.accepted.Add(1)
 		go d.handle(c)
 	}
 }

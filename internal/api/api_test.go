@@ -97,13 +97,14 @@ func newFixture(t *testing.T) *fixture {
 		items: map[string]model.Item{
 			"a": {
 				ID: "a", Path: video, Rel: "movie.mp4",
-				Info: &model.MediaInfo{Duration: 13},
+				Info: &model.MediaInfo{Duration: 13, Audio: []model.AudioTrack{{}, {}}},
 				Subs: []model.SubTrack{
 					{ID: "e0", Source: "external", File: srt, Lang: "en"},
 					{ID: "e1", Source: "external", File: filepath.Join(dir, "missing.srt")},
 				},
 			},
-			"b": {ID: "b", Path: video, Rel: "b.mp4"}, // no media info
+			"b": {ID: "b", Path: video, Rel: "b.mp4"},                                       // no media info
+			"c": {ID: "c", Path: video, Rel: "c.mp4", Info: &model.MediaInfo{Duration: 13}}, // no audio tracks
 		},
 	}
 	tx := &fakeTX{dir: t.TempDir()}
@@ -214,15 +215,19 @@ func TestRoutes(t *testing.T) {
 		{name: "scan get not allowed", method: "GET", target: "/api/scan", status: 405},
 		{name: "unknown path", method: "GET", target: "/nope", status: 404},
 
-		{name: "cors preflight", method: "OPTIONS", target: "/api/info", status: 204,
+		{name: "cors preflight", method: "OPTIONS", target: "/file/a", status: 204,
 			wantHdr: map[string]string{
 				"Access-Control-Allow-Origin":   "*",
 				"Access-Control-Allow-Methods":  "GET, HEAD, POST, OPTIONS",
 				"Access-Control-Allow-Headers":  "Range, Content-Type",
 				"Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
 			}},
-		{name: "cors on response", method: "GET", target: "/api/info", status: 200,
+		{name: "cors on media response", method: "GET", target: "/file/a", status: 200,
 			wantHdr: map[string]string{"Access-Control-Allow-Origin": "*"}},
+		{name: "api has no cors", method: "GET", target: "/api/info", status: 200,
+			wantHdr: map[string]string{"Access-Control-Allow-Origin": ""}},
+		{name: "api preflight has no cors", method: "OPTIONS", target: "/api/info", status: 204,
+			wantHdr: map[string]string{"Access-Control-Allow-Origin": "", "Access-Control-Allow-Methods": ""}},
 	}
 
 	for _, tt := range tests {
@@ -320,12 +325,78 @@ func TestSegmentErrorIs503(t *testing.T) {
 func TestSegmentNumberPassedThrough(t *testing.T) {
 	fx := newFixture(t)
 	rec := httptest.NewRecorder()
-	fx.h.ServeHTTP(rec, request("GET", "/hls/a/2/seg00003.ts", ""))
+	fx.h.ServeHTTP(rec, request("GET", "/hls/a/1/seg00002.ts", ""))
 	if rec.Code != 200 {
 		t.Fatalf("status %d", rec.Code)
 	}
-	if len(fx.tx.seen) != 1 || fx.tx.seen[0] != 3 {
-		t.Fatalf("Segment called with %v, want [3]", fx.tx.seen)
+	if len(fx.tx.seen) != 1 || fx.tx.seen[0] != 2 {
+		t.Fatalf("Segment called with %v, want [2]", fx.tx.seen)
+	}
+}
+
+func TestSegmentAndPlaylistRange(t *testing.T) {
+	// Item a has 2 audio tracks and 3 segments (duration 13); item c has no audio tracks.
+	tests := []struct {
+		name       string
+		target     string
+		status     int
+		wantCalled bool
+	}{
+		{"last audio track", "/hls/a/1/seg00002.ts", 200, true},
+		{"audio past end", "/hls/a/2/seg00000.ts", 404, false},
+		{"last segment", "/hls/a/0/seg00002.ts", 200, true},
+		{"segment past end", "/hls/a/0/seg00003.ts", 404, false},
+		{"no audio tracks, audio 0", "/hls/c/0/seg00000.ts", 200, true},
+		{"no audio tracks, audio 1", "/hls/c/1/seg00000.ts", 404, false},
+		{"playlist audio past end", "/hls/a/2/index.m3u8", 404, false},
+		{"playlist no audio tracks, audio 1", "/hls/c/1/index.m3u8", 404, false},
+		{"playlist valid audio", "/hls/a/1/index.m3u8", 200, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newFixture(t)
+			rec := httptest.NewRecorder()
+			fx.h.ServeHTTP(rec, request("GET", tt.target, ""))
+			if rec.Code != tt.status {
+				t.Fatalf("status = %d, want %d; body=%q", rec.Code, tt.status, rec.Body.String())
+			}
+			if rec.Code == 404 && rec.Body.String() != "Not found" {
+				t.Errorf("body = %q, want Not found", rec.Body.String())
+			}
+			if called := len(fx.tx.seen) > 0; called != tt.wantCalled {
+				t.Errorf("transcoder called = %v, want %v", called, tt.wantCalled)
+			}
+		})
+	}
+}
+
+func TestRequestLevel(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		rng    string
+		want   slog.Level
+	}{
+		{"file no range", "/file/a", "", slog.LevelInfo},
+		{"file range from zero", "/file/a", "bytes=0-", slog.LevelInfo},
+		{"file range from zero with end", "/file/a", "bytes=0-99", slog.LevelInfo},
+		{"file seek range", "/file/a", "bytes=5000-", slog.LevelDebug},
+		{"file suffix range", "/file/a", "bytes=-500", slog.LevelDebug},
+		{"sub", "/sub/a/e0.vtt", "", slog.LevelInfo},
+		{"playlist", "/hls/a/0/index.m3u8", "", slog.LevelInfo},
+		{"segment", "/hls/a/0/seg00000.ts", "", slog.LevelDebug},
+		{"api", "/api/info", "", slog.LevelDebug},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", tt.target, nil)
+			if tt.rng != "" {
+				req.Header.Set("Range", tt.rng)
+			}
+			if got := requestLevel(req); got != tt.want {
+				t.Errorf("level = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -446,5 +517,29 @@ func TestAPIGuard(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
 		})
+	}
+}
+
+func TestInfoFollowsAddr(t *testing.T) {
+	lan, base := "192.168.1.10", "http://192.168.1.10:8200"
+	h := New(Deps{Config: &config.Config{}, Info: Info{Name: "n", LAN: lan, Base: base}, Addr: func() (string, string) { return lan, base }})
+	get := func() Info {
+		req := httptest.NewRequest("GET", "/api/info", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Host = "127.0.0.1:8200"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var out Info
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := get(); got.Base != base || got.Name != "n" {
+		t.Fatalf("info = %+v", got)
+	}
+	lan, base = "10.0.0.5", "http://10.0.0.5:8200"
+	if got := get(); got.LAN != "10.0.0.5" || got.Base != base {
+		t.Errorf("after the address changed, info = %+v", got)
 	}
 }

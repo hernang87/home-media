@@ -33,13 +33,14 @@ type App struct {
 	snap    model.Snapshot
 	devices []client.Device
 
-	tabs       *container.AppTabs
-	libraryTab *container.TabItem
-	remoteTab  *container.TabItem
-	logsTab    *container.TabItem
-	phoneTab   *container.TabItem
-	libStack   []fyne.CanvasObject // navigation stack of the Library tab; [0] is the grid
-	libHolder  *fyne.Container
+	tabs        *container.AppTabs
+	libraryTab  *container.TabItem
+	remoteTab   *container.TabItem
+	logsTab     *container.TabItem
+	phoneTab    *container.TabItem
+	settingsTab *container.TabItem
+	libStack    []fyne.CanvasObject // navigation stack of the Library tab; [0] is the grid
+	libHolder   *fyne.Container
 
 	deviceSel *widget.Select
 	onReload  []func() // called on the UI thread after the library changes
@@ -56,10 +57,15 @@ func NewApp(a fyne.App, w fyne.Window, c *client.Client) *App {
 	app.logsTab = container.NewTabItem("Logs", NewLogs(app))
 	phone := NewPhone(app)
 	app.phoneTab = container.NewTabItem("Phone", phone.Object())
-	app.tabs = container.NewAppTabs(app.libraryTab, app.remoteTab, app.phoneTab, app.logsTab)
+	settings := NewSettings(app)
+	app.settingsTab = container.NewTabItem("Settings", settings.Object())
+	app.tabs = container.NewAppTabs(app.libraryTab, app.remoteTab, app.phoneTab, app.settingsTab, app.logsTab)
 	app.tabs.OnSelected = func(t *container.TabItem) {
-		if t == app.phoneTab {
+		switch t {
+		case app.phoneTab:
 			phone.load()
+		case app.settingsTab:
+			settings.load()
 		}
 	}
 

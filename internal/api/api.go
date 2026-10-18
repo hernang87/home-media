@@ -1,4 +1,4 @@
-// Package api serves the HTTP API and media files. Port of server.js (node-ref).
+// Package api serves the HTTP API and media files.
 package api
 
 import (
@@ -26,14 +26,7 @@ type Transcoder interface {
 }
 
 // Info is returned by GET /api/info.
-type Info struct {
-	Name    string `json:"name"`
-	LAN     string `json:"lan"`
-	Port    int    `json:"port"`
-	Base    string `json:"base"` // http://<lan>:<port>
-	TMDB    bool   `json:"tmdb"`
-	Version string `json:"version"`
-}
+type Info = model.ServerInfo
 
 // Deps wires the handlers. Extra is mounted as-is for routes owned by other
 // packages (cast); it may be nil.
@@ -42,8 +35,12 @@ type Deps struct {
 	Lib    Library
 	TX     Transcoder
 	Info   Info
+	Addr   func() (lan, base string) // optional; current LAN address and base URL for /api/info
 	Extra  func(mux *http.ServeMux)
 	Logs   *logbuf.Buffer // optional; served at GET /api/logs
+	// Settings backs /api/settings; nil answers 404. Writes are accepted only
+	// from the machine mediad runs on.
+	Settings SettingsStore
 }
 
 // New returns the full handler: routes + CORS + API origin guard + LAN-only filter + request logging.

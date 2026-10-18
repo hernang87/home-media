@@ -6,7 +6,7 @@ import (
 )
 
 // aliases maps bibliographic ISO 639-2 codes that Intl.DisplayNames does not
-// know to the code it does (port of ALIASES in lib/subs.js).
+// know to the code it does.
 var aliases = map[string]string{
 	"ice": "isl", "gre": "ell", "rum": "ron", "slo": "slk", "cze": "ces",
 	"ger": "deu", "fre": "fra", "dut": "nld", "chi": "zho", "per": "fas",

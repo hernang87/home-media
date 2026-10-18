@@ -40,12 +40,15 @@ Set these in `.env` (see `.env.example`) or the environment.
 | `PORT` | `8200` | HTTP port |
 | `SERVER_NAME` | `Home Media` | Name shown to clients |
 
+You can also change these from the desktop app's Settings tab. The TMDB key and language apply immediately; a new media folder needs a restart.
+
 ## Security
 
 `mediad` has **no login**. It is meant for a trusted home network.
 
 - It listens on all interfaces but answers only loopback, private (RFC 1918 / unique-local) and link-local addresses.
-- `/api/` rejects requests carrying a foreign `Origin` header or a public-looking `Host` name, so a web page open in your browser cannot control your server.
+- `/api/` rejects requests carrying a foreign `Origin` header or a public-looking `Host` name, so a web page open in your browser cannot control your server. Reach it by IP address, `localhost`, a single-label name or a `.local`/`.lan`/`.home` name; a domain name (reverse proxy, split-DNS) gets 403 on `/api/`.
+- Changing settings (`POST /api/settings`) is accepted only from the Mac running `mediad`, never from other LAN devices or the phone page.
 - Media routes (`/file`, `/sub`, `/hls`) allow cross-origin reads, because the Chromecast receiver needs them. Anyone on your LAN who knows an item ID can fetch it.
 - Do not port-forward it to the internet.
 

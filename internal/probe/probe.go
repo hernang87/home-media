@@ -1,5 +1,4 @@
 // Package probe reads media files with ffprobe and decides how a Chromecast can play them.
-// Port of lib/probe.js (node-ref).
 package probe
 
 import (
@@ -120,7 +119,7 @@ func ParseFFprobe(raw []byte) (*model.MediaInfo, error) {
 	return info, nil
 }
 
-// parseDuration mirrors Number(x) || 0 from probe.js: unparsable or non-finite values become 0.
+// parseDuration returns 0 for unparsable or non-finite values.
 func parseDuration(s string) float64 {
 	d, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || math.IsNaN(d) || math.IsInf(d, 0) {
@@ -130,7 +129,7 @@ func parseDuration(s string) float64 {
 }
 
 // tagValue reads a tag by key, trying the exact key first and then any
-// case-insensitive match, as probe.js does with the lower and upper case keys.
+// case-insensitive match, with the lower and upper case keys.
 // Empty values count as missing.
 func tagValue(tags map[string]string, key string) string {
 	if v := tags[key]; v != "" {

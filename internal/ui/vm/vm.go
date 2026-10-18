@@ -12,16 +12,7 @@ import (
 )
 
 // Clock formats seconds as m:ss, or h:mm:ss from one hour on.
-func Clock(sec float64) string {
-	s := int(sec)
-	if s < 0 {
-		s = 0
-	}
-	if s >= 3600 {
-		return fmt.Sprintf("%d:%02d:%02d", s/3600, s%3600/60, s%60)
-	}
-	return fmt.Sprintf("%d:%02d", s/60, s%60)
-}
+func Clock(sec float64) string { return model.Clock(sec) }
 
 // ResumeLabel is the text of the "continue" choice.
 func ResumeLabel(pos float64) string { return "Continue from " + Clock(pos) }

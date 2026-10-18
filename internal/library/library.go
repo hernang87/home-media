@@ -1,10 +1,11 @@
 // Package library scans the media folder, keeps the item cache and watch
-// progress, and builds the API snapshot. Port of lib/library.js (node-ref).
+// progress, and builds the API snapshot.
 package library
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -50,6 +51,9 @@ type Library struct {
 	progress map[string]model.Progress
 	status   model.ScanStatus
 
+	artMu  sync.Mutex       // guards artVer; may be taken under mu, so never take mu while holding it
+	artVer map[string]int64 // art path -> mtime (unix seconds), 0 if missing
+
 	scanMu    sync.Mutex // held while a scan runs
 	pending   *bool      // queued rescan (refresh flag), guarded by mu
 	saveSoon  *debouncer
@@ -59,7 +63,7 @@ type Library struct {
 // New loads the cache and progress files from cfg.DataDir. meta may be a
 // disabled client (no API key).
 func New(cfg *config.Config, meta *metadata.Client) *Library {
-	l := &Library{cfg: cfg, meta: meta, items: map[string]*model.Item{}, shows: map[string]*model.Show{}, progress: map[string]model.Progress{}}
+	l := &Library{cfg: cfg, meta: meta, items: map[string]*model.Item{}, shows: map[string]*model.Show{}, progress: map[string]model.Progress{}, artVer: map[string]int64{}}
 	var c cacheFile
 	if readJSON(l.cachePath(), &c) == nil {
 		if c.Items != nil {
@@ -168,22 +172,40 @@ func walk(dir string, out *[]string) error {
 	return nil
 }
 
-// findSubtitles returns subtitle files named after the video, or any in its own
-// folder tree when it is the only video there.
-func (l *Library) findSubtitles(video string, files []string, videosByDir map[string]int) []string {
-	dir := filepath.Dir(video)
-	stem := strings.ToLower(norm.NFC.String(strings.TrimSuffix(filepath.Base(video), filepath.Ext(video))))
-	alone := dir != l.cfg.MediaDir && videosByDir[dir] == 1
-	var out []string
+// subIndex holds subtitle files by folder so each video finds its candidates
+// without scanning every file. direct lists the subs in a folder; tree lists
+// the subs at or below it (under the media root). Both keep walk order.
+type subIndex struct {
+	direct map[string][]string
+	tree   map[string][]string
+}
+
+func buildSubIndex(root string, files []string) subIndex {
+	idx := subIndex{direct: map[string][]string{}, tree: map[string][]string{}}
 	for _, f := range files {
 		if !SubExts[strings.ToLower(filepath.Ext(f))] {
 			continue
 		}
-		if alone && (f == dir || strings.HasPrefix(f, dir+string(filepath.Separator))) {
-			out = append(out, f)
-			continue
+		dir := filepath.Dir(f)
+		idx.direct[dir] = append(idx.direct[dir], f)
+		for d := dir; d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
+			idx.tree[d] = append(idx.tree[d], f)
 		}
-		if filepath.Dir(f) == dir && strings.HasPrefix(strings.ToLower(norm.NFC.String(filepath.Base(f))), stem) {
+	}
+	return idx
+}
+
+// findSubtitles returns subtitle files named after the video, or any in its own
+// folder tree when it is the only video there.
+func (l *Library) findSubtitles(video string, idx subIndex, videosByDir map[string]int) []string {
+	dir := filepath.Dir(video)
+	if dir != l.cfg.MediaDir && videosByDir[dir] == 1 {
+		return idx.tree[dir]
+	}
+	stem := strings.ToLower(norm.NFC.String(strings.TrimSuffix(filepath.Base(video), filepath.Ext(video))))
+	var out []string
+	for _, f := range idx.direct[dir] {
+		if strings.HasPrefix(strings.ToLower(norm.NFC.String(filepath.Base(f))), stem) {
 			out = append(out, f)
 		}
 	}
@@ -219,8 +241,9 @@ func (l *Library) Scan(ctx context.Context, refresh bool) error {
 		return nil
 	}
 	err := l.scanOnce(ctx, refresh)
-	l.scanMu.Unlock()
+	// Reset before unlocking so a queued scan that starts next cannot have its status clobbered.
 	l.setStatus(func(s *model.ScanStatus) { *s = model.ScanStatus{} })
+	l.scanMu.Unlock()
 
 	l.mu.Lock()
 	next := l.pending
@@ -246,10 +269,20 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 			videosByDir[filepath.Dir(f)]++
 		}
 	}
+	idx := buildSubIndex(l.cfg.MediaDir, files)
+	if refresh {
+		l.artMu.Lock()
+		l.artVer = map[string]int64{}
+		l.artMu.Unlock()
+	}
 
-	seen := map[string]bool{}
-	var toProbe []*model.Item
-	l.mu.Lock()
+	// Stat and match subtitles without the lock; only the item updates need it.
+	type scanned struct {
+		file, rel, id string
+		st            os.FileInfo
+		subFiles      []string
+	}
+	var found []scanned
 	for _, file := range videos {
 		st, err := os.Stat(file)
 		if err != nil {
@@ -260,21 +293,27 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 			continue
 		}
 		rel, _ := filepath.Rel(l.cfg.MediaDir, file)
-		id := IDFor(rel)
-		seen[id] = true
-		mtime := float64(st.ModTime().UnixMilli())
-		item := l.items[id]
-		changed := item == nil || item.Size != st.Size() || item.MTime != mtime
+		found = append(found, scanned{file: file, rel: rel, id: IDFor(rel), st: st, subFiles: l.findSubtitles(file, idx, videosByDir)})
+	}
+
+	seen := map[string]bool{}
+	var toProbe []*model.Item
+	l.mu.Lock()
+	for _, f := range found {
+		seen[f.id] = true
+		mtime := float64(f.st.ModTime().UnixMilli())
+		item := l.items[f.id]
+		changed := item == nil || item.Size != f.st.Size() || item.MTime != mtime
 		if item == nil {
-			item = &model.Item{ID: id}
-			l.items[id] = item
+			item = &model.Item{ID: f.id}
+			l.items[f.id] = item
 		}
-		item.Path, item.Rel, item.Size, item.MTime = file, rel, st.Size(), mtime
+		item.Path, item.Rel, item.Size, item.MTime = f.file, f.rel, f.st.Size(), mtime
 		if item.Added == 0 {
 			item.Added = mtime
 		}
-		item.Parsed = parse.ParseMediaPath(rel)
-		item.SubFiles = l.findSubtitles(file, files, videosByDir)
+		item.Parsed = parse.ParseMediaPath(f.rel)
+		item.SubFiles = f.subFiles
 		if changed || item.Info == nil {
 			toProbe = append(toProbe, item)
 		}
@@ -338,21 +377,91 @@ func stale(refresh bool, triedAt int64, hasMeta bool) bool {
 	return refresh || triedAt == 0 || (!hasMeta && time.Now().UnixMilli()-triedAt > retryMetaMS)
 }
 
+// needsLookup reports whether an item or show should be sent to TMDB. A refresh
+// re-fetches everything; otherwise only unmatched entries that are stale.
+func needsLookup(refresh bool, triedAt int64, hasMeta bool) bool {
+	return refresh || (!hasMeta && stale(false, triedAt, false))
+}
+
 func (l *Library) artPath(key, kind string) string {
 	return filepath.Join(l.cfg.ArtDir, fmt.Sprintf("%s.%s.jpg", key, kind))
+}
+
+// invalidateArt forgets the cached mtime of art files the library just wrote.
+func (l *Library) invalidateArt(paths ...string) {
+	l.artMu.Lock()
+	defer l.artMu.Unlock()
+	for _, p := range paths {
+		delete(l.artVer, p)
+	}
+}
+
+// fetchArt downloads the poster and backdrop of a TMDB match into key's art
+// files. An error means a download failed, not that TMDB has no image.
+func (l *Library) fetchArt(ctx context.Context, meta *model.Meta, key string) (model.Art, error) {
+	pPath, bPath := l.artPath(key, "poster"), l.artPath(key, "backdrop")
+	defer l.invalidateArt(pPath, bPath)
+	poster, err1 := l.meta.DownloadImage(ctx, meta.PosterPath, "w500", pPath)
+	backdrop, err2 := l.meta.DownloadImage(ctx, meta.BackdropPath, "w1280", bPath)
+	return model.Art{Poster: poster, Backdrop: backdrop}, errors.Join(err1, err2)
+}
+
+// enrichMovie stores the TMDB match for a movie. A failed lookup or download
+// leaves Meta and TriedAt alone so the next scan retries it.
+func (l *Library) enrichMovie(ctx context.Context, it *model.Item) {
+	meta, err := l.meta.LookupMovie(ctx, it.Parsed.Title, it.Parsed.Year)
+	if err != nil {
+		slog.Warn("movie metadata failed", "title", it.Parsed.Title, "err", err)
+		return
+	}
+	var art model.Art
+	if meta != nil {
+		if art, err = l.fetchArt(ctx, meta, it.ID); err != nil {
+			slog.Warn("movie artwork failed", "title", it.Parsed.Title, "err", err)
+			return
+		}
+	}
+	l.mu.Lock()
+	it.TriedAt = time.Now().UnixMilli()
+	if meta != nil {
+		it.Meta, it.Art = meta, art
+	}
+	l.mu.Unlock()
+}
+
+// enrichShow is enrichMovie for a show.
+func (l *Library) enrichShow(ctx context.Context, s *model.Show) {
+	meta, err := l.meta.LookupShow(ctx, s.Title, s.Year)
+	if err != nil {
+		slog.Warn("show metadata failed", "title", s.Title, "err", err)
+		return
+	}
+	var art model.Art
+	if meta != nil {
+		if art, err = l.fetchArt(ctx, meta, "show-"+s.Key); err != nil {
+			slog.Warn("show artwork failed", "title", s.Title, "err", err)
+			return
+		}
+	}
+	l.mu.Lock()
+	s.TriedAt = time.Now().UnixMilli()
+	if meta != nil {
+		s.Meta, s.Art = meta, art
+	}
+	l.mu.Unlock()
 }
 
 func (l *Library) enrich(ctx context.Context, refresh bool) {
 	l.mu.RLock()
 	var movies []*model.Item
 	for _, it := range l.items {
-		if it.Info != nil && it.Parsed.Type == model.TypeMovie && it.Meta == nil && stale(refresh, it.TriedAt, false) {
+		if it.Info != nil && it.Parsed.Type == model.TypeMovie && needsLookup(refresh, it.TriedAt, it.Meta != nil) {
 			movies = append(movies, it)
 		}
 	}
 	var shows []*model.Show
 	for _, s := range l.shows {
-		if s.Meta == nil && stale(refresh, s.TriedAt, false) {
+		if needsLookup(refresh, s.TriedAt, s.Meta != nil) {
 			shows = append(shows, s)
 		}
 	}
@@ -363,38 +472,10 @@ func (l *Library) enrich(ctx context.Context, refresh bool) {
 
 	mapLimit(movies, 4, func(it *model.Item) {
 		defer l.bump()
-		meta, err := l.meta.LookupMovie(ctx, it.Parsed.Title, it.Parsed.Year)
-		if err != nil {
-			slog.Warn("movie metadata failed", "title", it.Parsed.Title, "err", err)
-		}
-		art := model.Art{}
-		if meta != nil {
-			art.Poster, _ = l.meta.DownloadImage(ctx, meta.PosterPath, "w500", l.artPath(it.ID, "poster"))
-			art.Backdrop, _ = l.meta.DownloadImage(ctx, meta.BackdropPath, "w1280", l.artPath(it.ID, "backdrop"))
-		}
-		l.mu.Lock()
-		it.TriedAt = time.Now().UnixMilli()
-		if meta != nil {
-			it.Meta, it.Art = meta, art
-		}
-		l.mu.Unlock()
+		l.enrichMovie(ctx, it)
 	})
 	for _, s := range shows {
-		meta, err := l.meta.LookupShow(ctx, s.Title, s.Year)
-		if err != nil {
-			slog.Warn("show metadata failed", "title", s.Title, "err", err)
-		}
-		art := model.Art{}
-		if meta != nil {
-			art.Poster, _ = l.meta.DownloadImage(ctx, meta.PosterPath, "w500", l.artPath("show-"+s.Key, "poster"))
-			art.Backdrop, _ = l.meta.DownloadImage(ctx, meta.BackdropPath, "w1280", l.artPath("show-"+s.Key, "backdrop"))
-		}
-		l.mu.Lock()
-		s.TriedAt = time.Now().UnixMilli()
-		if meta != nil {
-			s.Meta, s.Art = meta, art
-		}
-		l.mu.Unlock()
+		l.enrichShow(ctx, s)
 		l.bump()
 	}
 	l.mu.RLock()
@@ -414,7 +495,7 @@ func (l *Library) enrichEpisodes(ctx context.Context, show *model.Show, refresh 
 	l.mu.RLock()
 	bySeason := map[int][]*model.Item{}
 	for _, it := range l.items {
-		if it.Parsed.Type == model.TypeEpisode && Slug(it.Parsed.Show) == show.Key && it.Meta == nil && stale(refresh, it.TriedAt, false) {
+		if it.Parsed.Type == model.TypeEpisode && Slug(it.Parsed.Show) == show.Key && needsLookup(refresh, it.TriedAt, it.Meta != nil) {
 			bySeason[it.Parsed.Season] = append(bySeason[it.Parsed.Season], it)
 		}
 	}
@@ -424,14 +505,21 @@ func (l *Library) enrichEpisodes(ctx context.Context, show *model.Show, refresh 
 	for season, eps := range bySeason {
 		info, err := l.meta.LookupSeason(ctx, tmdbID, season)
 		if err != nil {
+			// Leave the episodes untried so the next scan retries the season.
 			slog.Warn("season metadata failed", "show", show.Title, "season", season, "err", err)
-			info = nil
+			continue
 		}
 		for _, it := range eps {
 			e, ok := info[it.Parsed.Episode]
 			var gotStill bool
 			if ok {
-				gotStill, _ = l.meta.DownloadImage(ctx, e.StillPath, "w780", l.artPath(it.ID, "backdrop"))
+				p := l.artPath(it.ID, "backdrop")
+				gotStill, err = l.meta.DownloadImage(ctx, e.StillPath, "w780", p)
+				l.invalidateArt(p)
+				if err != nil {
+					slog.Warn("episode still failed", "show", show.Title, "season", season, "episode", it.Parsed.Episode, "err", err)
+					continue
+				}
 			}
 			l.mu.Lock()
 			it.TriedAt = time.Now().UnixMilli()
@@ -465,7 +553,9 @@ func (l *Library) makeThumbnails() {
 	mapLimit(need, 2, func(it *model.Item) {
 		defer l.bump()
 		at := math.Max(1, math.Min(it.Info.Duration*0.1, 600))
-		err := runFFmpeg(time.Minute, "-v", "error", "-y", "-ss", fmt.Sprint(at), "-i", it.Path, "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "4", l.artPath(it.ID, "backdrop"))
+		p := l.artPath(it.ID, "backdrop")
+		err := runFFmpeg(time.Minute, "-v", "error", "-y", "-ss", fmt.Sprint(at), "-i", it.Path, "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "4", p)
+		l.invalidateArt(p)
 		if err != nil {
 			slog.Warn("thumbnail failed", "file", it.Rel, "err", err)
 			return
@@ -527,15 +617,28 @@ func (l *Library) MarkWatched(id string, watched bool) {
 	l.stateSoon.Trigger()
 }
 
+// artVersion returns the cache-busting mtime of an art file, stat'ed once and
+// then served from artVer until the library rewrites the file. Holding artMu
+// across the stat means an invalidation cannot slip in between stat and store.
+func (l *Library) artVersion(path string) int64 {
+	l.artMu.Lock()
+	defer l.artMu.Unlock()
+	if v, ok := l.artVer[path]; ok {
+		return v
+	}
+	var v int64
+	if st, err := os.Stat(path); err == nil {
+		v = st.ModTime().Unix()
+	}
+	l.artVer[path] = v
+	return v
+}
+
 func (l *Library) artURL(key, kind string, has bool) *string {
 	if !has {
 		return nil
 	}
-	v := int64(0)
-	if st, err := os.Stat(l.artPath(key, kind)); err == nil {
-		v = st.ModTime().Unix()
-	}
-	u := fmt.Sprintf("/art/%s/%s?v=%d", key, kind, v)
+	u := fmt.Sprintf("/art/%s/%s?v=%d", key, kind, l.artVersion(l.artPath(key, kind)))
 	return &u
 }
 
@@ -618,14 +721,17 @@ func (l *Library) Snapshot() model.Snapshot {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Added > items[j].Added })
 
+	// Group episodes by show key in one pass.
+	epsByShow := map[string][]model.PublicItem{}
+	for _, it := range items {
+		if it.Show != nil {
+			epsByShow[it.Show.Key] = append(epsByShow[it.Show.Key], it)
+		}
+	}
+
 	shows := []model.PublicShow{}
 	for _, s := range l.shows {
-		var eps []model.PublicItem
-		for _, it := range items {
-			if it.Show != nil && it.Show.Key == s.Key {
-				eps = append(eps, it)
-			}
-		}
+		eps := epsByShow[s.Key]
 		if len(eps) == 0 {
 			continue
 		}

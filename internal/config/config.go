@@ -1,5 +1,4 @@
 // Package config loads settings from flags, environment and .env.
-// Port of lib/config.js (node-ref).
 package config
 
 import (
@@ -31,7 +30,7 @@ const (
 	dataDirName       = "data"
 )
 
-// envLineRE matches KEY=value lines the same way lib/config.js does.
+// envLineRE matches KEY=value lines as a shell would.
 var envLineRE = regexp.MustCompile(`^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$`)
 
 // Load reads an optional .env in the working directory (never overriding real
@@ -154,6 +153,24 @@ func findMediaDir(mediaArg, envMediaDir string) (string, error) {
 	}
 	return "", fmt.Errorf("no media directory found; searched %s; pass a folder as the argument or set MEDIA_DIR",
 		strings.Join(searched, ", "))
+}
+
+// ResolveDir expands a leading "~" in p and returns the absolute path of an
+// existing directory.
+func ResolveDir(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", fmt.Errorf("no folder given")
+	}
+	home, homeErr := os.UserHomeDir()
+	abs, err := filepath.Abs(expandHome(p, home, homeErr == nil))
+	if err != nil {
+		return "", err
+	}
+	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%s is not a folder", abs)
+	}
+	return abs, nil
 }
 
 // expandHome replaces a leading "~" or "~/" with home.

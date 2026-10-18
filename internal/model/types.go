@@ -179,7 +179,7 @@ type PublicProgress struct {
 	T       int64 `json:"t"`
 }
 
-// PublicItem is the API shape of an item (see snapshot() in the Node library.js).
+// PublicItem is the API shape of an item.
 type PublicItem struct {
 	ID       string          `json:"id"`
 	Type     MediaType       `json:"type"`

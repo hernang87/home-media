@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,49 @@ func TestPlaylist(t *testing.T) {
 	}
 	if !strings.Contains(Playlist(0), "#EXTINF:0.001,") {
 		t.Error("zero duration must still yield a valid segment")
+	}
+}
+
+func TestStaleSegments(t *testing.T) {
+	names := []string{
+		"seg00000.ts", "seg00005.ts", "seg00019.ts", "seg00020.ts", "seg00021.ts", "seg00030.ts",
+		"seg00005.ts.tmp", "ff5.m3u8", "junk.ts",
+	}
+	tests := []struct {
+		name       string
+		lastReq    int
+		keepBehind int
+		want       []string
+	}{
+		{"keeps the window", 40, 20, []string{"seg00000.ts", "seg00005.ts", "seg00019.ts"}},
+		{"boundary kept", 25, 20, []string{"seg00000.ts"}},
+		{"nothing old enough", 10, 20, nil},
+		{"zero request", 0, 20, nil},
+		{"no window", 40, 0, []string{"seg00000.ts", "seg00005.ts", "seg00019.ts", "seg00020.ts", "seg00021.ts", "seg00030.ts"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := staleSegments(names, tt.lastReq, tt.keepBehind)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("staleSegments(%d, %d) = %v, want %v", tt.lastReq, tt.keepBehind, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaxSegment(t *testing.T) {
+	tests := []struct {
+		names []string
+		want  int
+	}{
+		{nil, -1},
+		{[]string{"ff0.m3u8", "seg00000.ts.tmp"}, -1},
+		{[]string{"seg00002.ts", "seg00010.ts", "seg00004.ts"}, 10},
+	}
+	for _, tt := range tests {
+		if got := maxSegment(tt.names); got != tt.want {
+			t.Errorf("maxSegment(%v) = %d, want %d", tt.names, got, tt.want)
+		}
 	}
 }
 

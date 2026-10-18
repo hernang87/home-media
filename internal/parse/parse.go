@@ -1,5 +1,4 @@
 // Package parse turns release-style file names into library metadata.
-// Port of lib/parse.js (node-ref).
 package parse
 
 import (
