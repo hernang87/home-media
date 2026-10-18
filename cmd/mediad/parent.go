@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -17,6 +18,7 @@ func watchParent(ctx context.Context, onGone func()) {
 	if err != nil || want <= 1 {
 		return
 	}
+	slog.Info("started by the desktop app; will exit when it quits", "app_pid", want)
 	go pollParent(ctx, want, time.Second, os.Getppid, onGone)
 }
 
