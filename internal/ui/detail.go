@@ -100,7 +100,26 @@ func movieBody(a *App, key string) fyne.CanvasObject {
 			})
 		}()
 	})
-	items = append(items, container.NewHBox(play, mark))
+	row := container.NewHBox(play, mark)
+	if vm.Resumable(it) {
+		var clear *widget.Button
+		clear = widget.NewButton("Clear progress", func() {
+			clear.Disable()
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				if err := a.Client.SetWatched(ctx, it.ID, false); err != nil {
+					fyne.Do(clear.Enable)
+					a.ShowError(fmt.Errorf("could not clear progress for %q: %w", it.Title, err))
+					return
+				}
+				a.Reload()
+				fyne.Do(clear.Hide)
+			}()
+		})
+		row.Add(clear)
+	}
+	items = append(items, row)
 
 	if it.Tagline != "" {
 		tag := wrapped(it.Tagline)

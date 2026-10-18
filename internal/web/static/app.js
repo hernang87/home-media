@@ -409,6 +409,7 @@ function openItem(it) {
   const choice = { audio: defAudio, sub: "" };
   const dev = currentDevice();
   const watched = it.progress && it.progress.watched;
+  const partial = it.progress && !it.progress.watched && it.progress.pos > 0;
   showSheet(
     it.backdrop && h("div", { class: "backdrop", style: `background-image:url("${it.backdrop}")` }),
     h("h3", null, itemTitle(it)),
@@ -424,6 +425,7 @@ function openItem(it) {
     h("div", { class: "actions" },
       h("button", { class: "btn primary", disabled: !dev, onclick: () => play(it, choice) }, dev ? `Play on ${dev.name}` : "No Chromecast"),
       h("button", { class: "btn", onclick: () => markWatched(it, !watched) }, watched ? "Mark unwatched" : "Mark watched"),
+      partial && h("button", { class: "btn", onclick: () => markWatched(it, false) }, "Clear progress"),
     ),
   );
 }
