@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -47,7 +46,7 @@ type session struct {
 }
 
 func newSession(m *Manager, dev Device) *session {
-	return &session{m: m, dev: dev, changed: make(chan struct{}), st: Status{State: "DISCONNECTED"}}
+	return &session{m: m, dev: dev, changed: make(chan struct{}), st: Status{State: model.StateDisconnected}}
 }
 
 // device returns the device record; its address can change between connects.
@@ -109,7 +108,7 @@ func (s *session) connect() error {
 	}
 	s.mu.Lock()
 	s.c, s.lastRx = nc, time.Now()
-	s.st.State = "IDLE"
+	s.st.State = model.StateIdle
 	s.mu.Unlock()
 	in := make(chan message, 16)
 	go nc.readLoop(in)
@@ -153,7 +152,7 @@ func (s *session) drop(c *conn) {
 	s.mu.Lock()
 	if s.c == c {
 		s.c, s.transportID, s.sessionID, s.mediaID = nil, "", "", 0
-		s.st.State = "DISCONNECTED"
+		s.st.State = model.StateDisconnected
 		s.notifyLocked()
 	}
 	s.mu.Unlock()
@@ -166,7 +165,7 @@ func (s *session) heartbeat(c *conn) {
 		s.mu.Lock()
 		cur := s.c == c
 		dead := time.Since(s.lastRx) > deadAfter
-		media, transport, playing := s.mediaID, s.transportID, s.st.State == "PLAYING" || s.st.State == "BUFFERING"
+		media, transport, playing := s.mediaID, s.transportID, s.st.State == model.StatePlaying || s.st.State == model.StateBuffering
 		s.mu.Unlock()
 		if !cur {
 			return
@@ -195,11 +194,11 @@ func (s *session) dispatch(c *conn, in <-chan message) {
 }
 
 type mediaStatus struct {
-	MediaSessionID int     `json:"mediaSessionId"`
-	PlayerState    string  `json:"playerState"`
-	CurrentTime    float64 `json:"currentTime"`
-	IdleReason     string  `json:"idleReason"`
-	ActiveTrackIDs []int   `json:"activeTrackIds"`
+	MediaSessionID int             `json:"mediaSessionId"`
+	PlayerState    model.CastState `json:"playerState"`
+	CurrentTime    float64         `json:"currentTime"`
+	IdleReason     string          `json:"idleReason"`
+	ActiveTrackIDs []int           `json:"activeTrackIds"`
 	Media          *struct {
 		Duration float64 `json:"duration"`
 	} `json:"media"`
@@ -220,45 +219,11 @@ func (s *session) handle(c *conn, m message) {
 
 	switch {
 	case m.Namespace == nsReceiver && h.Type == "RECEIVER_STATUS":
-		var p struct {
-			Status struct {
-				Applications []struct {
-					AppID       string `json:"appId"`
-					TransportID string `json:"transportId"`
-					SessionID   string `json:"sessionId"`
-				} `json:"applications"`
-				Volume struct {
-					Level float64 `json:"level"`
-					Muted bool    `json:"muted"`
-				} `json:"volume"`
-			} `json:"status"`
-		}
-		if json.Unmarshal(m.Data, &p) == nil {
-			s.st.Volume, s.st.Muted = p.Status.Volume.Level, p.Status.Volume.Muted
-			found := false
-			for _, a := range p.Status.Applications {
-				if a.AppID != defaultReceiverApp {
-					continue
-				}
-				found = true
-				if s.transportID != a.TransportID {
-					s.transportID, s.sessionID = a.TransportID, a.SessionID
-					_, _ = c.send(nsConnection, a.TransportID, map[string]any{"type": "CONNECT"})
-				}
-			}
-			if !found && s.transportID != "" {
-				// Our app was closed (stopped from here, or by someone else).
-				save = s.leaveLocked()
-				s.transportID, s.sessionID, s.mediaID = "", "", 0
-				s.st.State, s.st.Position, s.st.ItemID = "IDLE", 0, ""
-			}
-		}
+		save = s.applyReceiverLocked(c, m.Data)
 
 	case m.Namespace == nsConnection && h.Type == "CLOSE":
 		if m.Source != receiverID {
-			save = s.leaveLocked()
-			s.transportID, s.sessionID, s.mediaID = "", "", 0
-			s.st.State, s.st.ItemID = "IDLE", ""
+			save = s.appClosedLocked()
 		}
 
 	case m.Namespace == nsMedia && h.Type == "MEDIA_STATUS":
@@ -269,7 +234,7 @@ func (s *session) handle(c *conn, m message) {
 			save = s.applyMediaLocked(p.Status[0])
 		}
 
-	case m.Namespace == nsMedia && (h.Type == "LOAD_FAILED" || h.Type == "INVALID_REQUEST" || h.Type == "LOAD_CANCELLED" || h.Type == "INVALID_PLAYER_STATE"):
+	case m.Namespace == nsMedia && loadErrors[h.Type]:
 		if s.loadReq == 0 || h.RequestID == s.loadReq {
 			s.loadErr = h.Type
 			s.st.Error = h.Type
@@ -284,6 +249,55 @@ func (s *session) handle(c *conn, m message) {
 	}
 }
 
+// loadErrors are the media replies that mean a LOAD (or other request) failed.
+var loadErrors = map[string]bool{"LOAD_FAILED": true, "INVALID_REQUEST": true, "LOAD_CANCELLED": true, "INVALID_PLAYER_STATE": true}
+
+// applyReceiverLocked folds a RECEIVER_STATUS into the session: volume, and
+// whether the Default Media Receiver is (still) running.
+func (s *session) applyReceiverLocked(c *conn, data []byte) *saveReq {
+	var p struct {
+		Status struct {
+			Applications []struct {
+				AppID       string `json:"appId"`
+				TransportID string `json:"transportId"`
+				SessionID   string `json:"sessionId"`
+			} `json:"applications"`
+			Volume struct {
+				Level float64 `json:"level"`
+				Muted bool    `json:"muted"`
+			} `json:"volume"`
+		} `json:"status"`
+	}
+	if json.Unmarshal(data, &p) != nil {
+		return nil
+	}
+	s.st.Volume, s.st.Muted = p.Status.Volume.Level, p.Status.Volume.Muted
+	found := false
+	for _, a := range p.Status.Applications {
+		if a.AppID != defaultReceiverApp {
+			continue
+		}
+		found = true
+		if s.transportID != a.TransportID {
+			s.transportID, s.sessionID = a.TransportID, a.SessionID
+			_, _ = c.send(nsConnection, a.TransportID, map[string]any{"type": "CONNECT"})
+		}
+	}
+	if !found && s.transportID != "" {
+		// Our app was closed (stopped from here, or by someone else).
+		return s.appClosedLocked()
+	}
+	return nil
+}
+
+// appClosedLocked forgets the receiver app and returns the progress to store.
+func (s *session) appClosedLocked() *saveReq {
+	save := s.leaveLocked()
+	s.transportID, s.sessionID, s.mediaID = "", "", 0
+	s.st.State, s.st.Position, s.st.ItemID = model.StateIdle, 0, ""
+	return save
+}
+
 type saveReq struct {
 	id       string
 	pos, dur float64
@@ -293,7 +307,7 @@ type saveReq struct {
 func (s *session) applyMediaLocked(ms mediaStatus) *saveReq {
 	prev := s.st.State
 	var cancelled *saveReq
-	if ms.PlayerState == "IDLE" && ms.IdleReason == "CANCELLED" && ms.MediaSessionID == s.mediaID {
+	if ms.PlayerState == model.StateIdle && ms.IdleReason == "CANCELLED" && ms.MediaSessionID == s.mediaID {
 		cancelled = s.leaveLocked() // before the status below overwrites the position
 	}
 	s.mediaID = ms.MediaSessionID
@@ -310,10 +324,10 @@ func (s *session) applyMediaLocked(ms mediaStatus) *saveReq {
 		}
 	}
 	switch ms.PlayerState {
-	case "PLAYING", "PAUSED", "BUFFERING", "IDLE":
+	case model.StatePlaying, model.StatePaused, model.StateBuffering, model.StateIdle:
 		s.st.State = ms.PlayerState
 	}
-	if s.st.State != "IDLE" {
+	if s.st.State != model.StateIdle {
 		s.loadErr, s.st.Error = "", ""
 	}
 	id := s.st.ItemID
@@ -321,13 +335,13 @@ func (s *session) applyMediaLocked(ms mediaStatus) *saveReq {
 		return nil
 	}
 	switch {
-	case s.st.State == "IDLE" && ms.IdleReason == "FINISHED":
+	case s.st.State == model.StateIdle && ms.IdleReason == "FINISHED":
 		s.mediaID = 0
 		s.m.onStop(id)
 		return &saveReq{id, s.st.Duration, s.st.Duration}
-	case s.st.State == "IDLE":
+	case s.st.State == model.StateIdle:
 		return cancelled
-	case s.st.State == "PAUSED" && prev != "PAUSED", time.Since(s.lastSave) >= saveEvery:
+	case s.st.State == model.StatePaused && prev != model.StatePaused, time.Since(s.lastSave) >= saveEvery:
 		s.lastSave = time.Now()
 		return &saveReq{id, ms.CurrentTime, s.st.Duration}
 	}
@@ -346,7 +360,7 @@ func (s *session) status() Status {
 // positionLocked is the playback position, extrapolated since the last MEDIA_STATUS while playing.
 func (s *session) positionLocked() float64 {
 	pos := s.st.Position
-	if s.st.State == "PLAYING" && !s.stAt.IsZero() {
+	if s.st.State == model.StatePlaying && !s.stAt.IsZero() {
 		pos += time.Since(s.stAt).Seconds()
 		if s.st.Duration > 0 && pos > s.st.Duration {
 			pos = s.st.Duration
@@ -358,7 +372,7 @@ func (s *session) positionLocked() float64 {
 // leaveLocked returns the progress to store when playback ends without FINISHED
 // (stopped, app closed, cancelled), or nil if nothing meaningful was playing.
 func (s *session) leaveLocked() *saveReq {
-	if s.st.ItemID == "" || s.mediaID == 0 || s.st.State == "IDLE" || s.st.State == "LOADING" {
+	if s.st.ItemID == "" || s.mediaID == 0 || s.st.State == model.StateIdle || s.st.State == model.StateLoading {
 		return nil
 	}
 	return &saveReq{s.st.ItemID, s.positionLocked(), s.st.Duration}
@@ -373,7 +387,7 @@ func (s *session) play(ctx context.Context, item model.Item, load loadSpec) erro
 	c, transport, oldMedia := s.c, s.transportID, s.mediaID
 	s.tracks = load.trackSubs
 	s.st.ItemID, s.st.Audio, s.st.Mode, s.st.Sub = item.ID, load.audio, load.mode, load.activeSub
-	s.st.State, s.st.Position, s.st.Error = "LOADING", load.start, ""
+	s.st.State, s.st.Position, s.st.Error = model.StateLoading, load.start, ""
 	s.st.Duration = load.duration
 	s.stAt, s.loadErr, s.loadReq = time.Time{}, "", 0
 	s.lastSave = time.Now()
@@ -396,7 +410,7 @@ func (s *session) play(ctx context.Context, item model.Item, load loadSpec) erro
 		if s.loadErr != "" {
 			return true
 		}
-		return s.mediaID != 0 && s.mediaID != oldMedia && (s.st.State == "PLAYING" || s.st.State == "PAUSED" || s.st.State == "BUFFERING")
+		return s.mediaID != 0 && s.mediaID != oldMedia && s.st.State.Active()
 	})
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -404,7 +418,7 @@ func (s *session) play(ctx context.Context, item model.Item, load loadSpec) erro
 		err = fmt.Errorf("chromecast refused to load the media (%s)", s.loadErr)
 	}
 	if err != nil {
-		s.st.State, s.st.Error = "IDLE", err.Error()
+		s.st.State, s.st.Error = model.StateIdle, err.Error()
 	}
 	return err
 }
@@ -429,102 +443,156 @@ func (r ControlRequest) text() string {
 	return v
 }
 
-func (s *session) control(ctx context.Context, req ControlRequest) error {
-	s.mu.Lock()
-	c, transport, media := s.c, s.transportID, s.mediaID
-	session := s.sessionID
-	itemID, audio := s.st.ItemID, s.st.Audio
-	trackIDs := map[string]int{}
-	for id, sub := range s.tracks {
-		trackIDs[sub] = id
-	}
-	s.mu.Unlock()
-	if c == nil {
-		return errClosed
-	}
-	needMedia := func() error {
-		if transport == "" || media == 0 {
-			return badRequest("nothing is playing on this device")
-		}
-		return nil
-	}
-	send := func(ns, dst string, p map[string]any) error { _, err := c.send(ns, dst, p); return err }
+// controlTarget is what a transport command needs from the session, copied
+// under s.mu so the commands can send without holding it.
+type controlTarget struct {
+	c                  *conn
+	transport, session string
+	media              int
+	itemID             string
+	audio              int
+	trackIDs           map[string]int // sub id -> castTrackId
+}
 
+func (s *session) snapshotControl() (controlTarget, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.c == nil {
+		return controlTarget{}, errClosed
+	}
+	t := controlTarget{c: s.c, transport: s.transportID, session: s.sessionID, media: s.mediaID, itemID: s.st.ItemID, audio: s.st.Audio, trackIDs: map[string]int{}}
+	for id, sub := range s.tracks {
+		t.trackIDs[sub] = id
+	}
+	return t, nil
+}
+
+func (t controlTarget) send(ns, dst string, p map[string]any) error {
+	_, err := t.c.send(ns, dst, p)
+	return err
+}
+
+// requireMedia fails when no media session is loaded.
+func (t controlTarget) requireMedia() error {
+	if t.transport == "" || t.media == 0 {
+		return badRequest("nothing is playing on this device")
+	}
+	return nil
+}
+
+// sendMedia sends a media command for the current media session.
+func (t controlTarget) sendMedia(p map[string]any) error {
+	if err := t.requireMedia(); err != nil {
+		return err
+	}
+	p["mediaSessionId"] = t.media
+	return t.send(nsMedia, t.transport, p)
+}
+
+func (s *session) control(ctx context.Context, req ControlRequest) error {
+	t, err := s.snapshotControl()
+	if err != nil {
+		return err
+	}
 	switch req.Action {
-	case "pause", "resume":
-		if err := needMedia(); err != nil {
-			return err
-		}
-		t := map[string]string{"pause": "PAUSE", "resume": "PLAY"}[req.Action]
-		return send(nsMedia, transport, map[string]any{"type": t, "mediaSessionId": media})
+	case "pause":
+		return t.sendMedia(map[string]any{"type": "PAUSE"})
+	case "resume":
+		return t.sendMedia(map[string]any{"type": "PLAY"})
 	case "seek":
-		if err := needMedia(); err != nil {
-			return err
-		}
-		v, err := req.number()
-		if err != nil {
-			return err
-		}
-		return send(nsMedia, transport, map[string]any{"type": "SEEK", "mediaSessionId": media, "currentTime": v, "resumeState": "PLAYBACK_START"})
+		return t.seek(req)
 	case "stop":
-		if itemID != "" {
-			if st := s.status(); st.State == "PLAYING" || st.State == "PAUSED" || st.State == "BUFFERING" {
-				s.m.lib.SetProgress(itemID, st.Position, st.Duration)
-			}
-		}
-		if session != "" {
-			// Closing the receiver app returns the TV to its ambient screen.
-			if err := send(nsReceiver, receiverID, map[string]any{"type": "STOP", "sessionId": session}); err != nil {
-				return err
-			}
-		}
-		if itemID != "" {
-			s.m.onStop(itemID)
-		}
-		return nil
+		return s.stop(t)
 	case "volume":
-		v, err := req.number()
-		if err != nil {
-			return err
-		}
-		if v < 0 || v > 1 {
-			return badRequest("volume must be between 0 and 1")
-		}
-		return send(nsReceiver, receiverID, map[string]any{"type": "SET_VOLUME", "volume": map[string]any{"level": v}})
+		return t.volume(req)
 	case "mute":
-		var b bool
-		if err := json.Unmarshal(req.Value, &b); err != nil {
-			return badRequest("mute needs true or false")
-		}
-		return send(nsReceiver, receiverID, map[string]any{"type": "SET_VOLUME", "volume": map[string]any{"muted": b}})
+		return t.mute(req)
 	case "sub":
-		if err := needMedia(); err != nil {
-			return err
-		}
-		active := []int{}
-		if sub := req.text(); sub != "" {
-			id, ok := trackIDs[sub]
-			if !ok {
-				return badRequest("unknown subtitle %q", sub)
-			}
-			active = append(active, id)
-		}
-		return send(nsMedia, transport, map[string]any{"type": "EDIT_TRACKS_INFO", "mediaSessionId": media, "activeTrackIds": active})
+		return t.sub(req)
 	case "audio":
-		v, err := req.number()
-		if err != nil {
-			return err
-		}
-		if itemID == "" {
-			return badRequest("nothing is playing on this device")
-		}
-		if int(v) == audio {
-			return nil
-		}
-		st := s.status()
-		return s.m.Play(ctx, s.device().ID, PlayRequest{ItemID: itemID, Audio: int(v), Sub: st.Sub, Start: st.Position, Mode: "transcode", Resume: "restart"})
+		return s.switchAudio(ctx, t, req)
 	}
 	return badRequest("unknown action %q", req.Action)
+}
+
+func (t controlTarget) seek(req ControlRequest) error {
+	if err := t.requireMedia(); err != nil {
+		return err
+	}
+	v, err := req.number()
+	if err != nil {
+		return err
+	}
+	return t.sendMedia(map[string]any{"type": "SEEK", "currentTime": v, "resumeState": "PLAYBACK_START"})
+}
+
+func (t controlTarget) volume(req ControlRequest) error {
+	v, err := req.number()
+	if err != nil {
+		return err
+	}
+	if v < 0 || v > 1 {
+		return badRequest("volume must be between 0 and 1")
+	}
+	return t.send(nsReceiver, receiverID, map[string]any{"type": "SET_VOLUME", "volume": map[string]any{"level": v}})
+}
+
+func (t controlTarget) mute(req ControlRequest) error {
+	var b bool
+	if err := json.Unmarshal(req.Value, &b); err != nil {
+		return badRequest("mute needs true or false")
+	}
+	return t.send(nsReceiver, receiverID, map[string]any{"type": "SET_VOLUME", "volume": map[string]any{"muted": b}})
+}
+
+func (t controlTarget) sub(req ControlRequest) error {
+	if err := t.requireMedia(); err != nil {
+		return err
+	}
+	active := []int{}
+	if sub := req.text(); sub != "" {
+		id, ok := t.trackIDs[sub]
+		if !ok {
+			return badRequest("unknown subtitle %q", sub)
+		}
+		active = append(active, id)
+	}
+	return t.sendMedia(map[string]any{"type": "EDIT_TRACKS_INFO", "activeTrackIds": active})
+}
+
+// stop saves progress and closes the receiver app, which returns the TV to its
+// ambient screen.
+func (s *session) stop(t controlTarget) error {
+	if t.itemID != "" {
+		if st := s.status(); st.State.Active() {
+			s.m.lib.SetProgress(t.itemID, st.Position, st.Duration)
+		}
+	}
+	if t.session != "" {
+		if err := t.send(nsReceiver, receiverID, map[string]any{"type": "STOP", "sessionId": t.session}); err != nil {
+			return err
+		}
+	}
+	if t.itemID != "" {
+		s.m.onStop(t.itemID)
+	}
+	return nil
+}
+
+// switchAudio reloads the item with another audio track from the current position.
+func (s *session) switchAudio(ctx context.Context, t controlTarget, req ControlRequest) error {
+	v, err := req.number()
+	if err != nil {
+		return err
+	}
+	if t.itemID == "" {
+		return badRequest("nothing is playing on this device")
+	}
+	if int(v) == t.audio {
+		return nil
+	}
+	st := s.status()
+	return s.m.Play(ctx, s.device().ID, PlayRequest{ItemID: t.itemID, Audio: int(v), Sub: st.Sub, Start: st.Position, Mode: "transcode", Resume: "restart"})
 }
 
 // close ends the connection (used on shutdown).
@@ -534,14 +602,5 @@ func (s *session) close() {
 	s.mu.Unlock()
 	if c != nil {
 		s.drop(c)
-	}
-}
-
-func contentTypeForFile(path string) string {
-	switch strings.ToLower(path[strings.LastIndex(path, ".")+1:]) {
-	case "webm":
-		return "video/webm"
-	default:
-		return "video/mp4"
 	}
 }

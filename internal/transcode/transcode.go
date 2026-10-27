@@ -39,6 +39,13 @@ const (
 	idleTime   = 10 * time.Minute
 	pollEvery  = 100 * time.Millisecond
 	waitMax    = 90 * time.Second
+	// maxStarts is how many times Segment starts ffmpeg before giving up on a segment.
+	maxStarts = 3
+	// hwGrace: a hardware encode that fails sooner than this switches to software for good.
+	hwGrace = 15 * time.Second
+	// stderrTail is how many bytes of ffmpeg stderr are logged on failure.
+	stderrTail   = 400
+	janitorEvery = 3 * time.Second
 )
 
 var segFileRe = regexp.MustCompile(`^seg(\d+)\.ts$`)
@@ -54,6 +61,16 @@ func SegmentCount(duration float64) int {
 
 // SegmentName is the file name of segment n.
 func SegmentName(n int) string { return fmt.Sprintf("seg%05d.ts", n) }
+
+// ParseSegmentName returns the segment number of a segment file name.
+func ParseSegmentName(name string) (int, bool) {
+	m := segFileRe.FindStringSubmatch(name)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	return n, err == nil
+}
 
 // Playlist returns the complete VOD playlist for a duration in seconds. It
 // needs no ffmpeg, so players can seek anywhere immediately.
@@ -172,26 +189,22 @@ func (s *session) segNames() []string {
 
 // maxSegment returns the highest finished segment number in names, or -1.
 func maxSegment(names []string) int {
-	max := -1
+	highest := -1
 	for _, name := range names {
-		if m := segFileRe.FindStringSubmatch(name); m != nil {
-			if n, _ := strconv.Atoi(m[1]); n > max {
-				max = n
-			}
+		if n, ok := ParseSegmentName(name); ok && n > highest {
+			highest = n
 		}
 	}
-	return max
+	return highest
 }
 
-// staleSegments returns the segment names in names more than keepBehind
-// segments behind lastReq.
-func staleSegments(names []string, lastReq, keepBehind int) []string {
+// staleSegments returns the segment names in names more than keep segments
+// behind lastReq.
+func staleSegments(names []string, lastReq, keep int) []string {
 	var stale []string
 	for _, name := range names {
-		if m := segFileRe.FindStringSubmatch(name); m != nil {
-			if n, _ := strconv.Atoi(m[1]); n < lastReq-keepBehind {
-				stale = append(stale, name)
-			}
+		if n, ok := ParseSegmentName(name); ok && n < lastReq-keep {
+			stale = append(stale, name)
 		}
 	}
 	return stale
@@ -237,19 +250,19 @@ func (m *Manager) startLocked(s *session, seg int) {
 		s.mu.Unlock()
 		if err != nil && !p.killed.Load() {
 			tail := stderr.String()
-			if len(tail) > 400 {
-				tail = tail[len(tail)-400:]
+			if len(tail) > stderrTail {
+				tail = tail[len(tail)-stderrTail:]
 			}
 			slog.Error("ffmpeg failed", "title", s.item.Rel, "hw", hw, "err", strings.TrimSpace(tail))
 			// The hardware path can be unsupported for some inputs; fall back to software for good.
-			if hw && time.Since(began) < 15*time.Second {
+			if hw && time.Since(began) < hwGrace {
 				m.hwOK.Store(false)
 			}
 		}
 	}()
 }
 
-// worthWaiting reports whether the running ffmpeg will reach segment n soon. s.mu must be held.
+// worthWaitingLocked reports whether the running ffmpeg will reach segment n soon. s.mu must be held.
 func (s *session) worthWaitingLocked(n int) bool {
 	if s.proc == nil {
 		return false
@@ -305,7 +318,7 @@ func (m *Manager) Segment(ctx context.Context, item model.Item, audio, n int) (s
 			s.mu.Lock()
 			if s.proc == nil {
 				// ffmpeg ended without producing it (failure, or it was throttled): start again.
-				if starts >= 3 {
+				if starts >= maxStarts {
 					s.mu.Unlock()
 					return "", errors.New("transcode failed")
 				}
@@ -348,7 +361,7 @@ func (m *Manager) StopItem(id string) {
 
 // janitor keeps transcoding a bounded distance ahead of playback and drops idle sessions.
 func (m *Manager) janitor() {
-	t := time.NewTicker(3 * time.Second)
+	t := time.NewTicker(janitorEvery)
 	defer t.Stop()
 	for {
 		select {

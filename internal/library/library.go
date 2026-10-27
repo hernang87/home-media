@@ -27,7 +27,20 @@ import (
 	"homemedia/internal/subs"
 )
 
-const retryMetaMS = 24 * 60 * 60 * 1000
+const (
+	// retryMeta is how long an unmatched item waits before TMDB is asked again.
+	retryMeta = 24 * time.Hour
+	// maxSampleSize is the size below which a file named "sample" is skipped.
+	maxSampleSize = 200 << 20
+	// watchedFraction and watchedTail mark an item watched once playback passes
+	// this share of its duration or comes within this many seconds of the end.
+	watchedFraction = 0.92
+	watchedTail     = 120
+	// Worker counts for the scan phases.
+	probeWorkers     = 3
+	metadataWorkers  = 4
+	thumbnailWorkers = 2
+)
 
 var sampleRe = regexp.MustCompile(`(?i)\bsample\b`)
 
@@ -257,9 +270,43 @@ func (l *Library) Scan(ctx context.Context, refresh bool) error {
 
 func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 	l.setStatus(func(s *model.ScanStatus) { *s = model.ScanStatus{Scanning: true, Phase: "Looking for files"} })
+	found, err := l.findVideos()
+	if err != nil {
+		return err
+	}
+	if refresh {
+		l.artMu.Lock()
+		l.artVer = map[string]int64{}
+		l.artMu.Unlock()
+	}
+	l.probeAll(ctx, l.mergeItems(found))
+
+	l.mu.Lock()
+	l.updatePlaybackLocked()
+	l.deriveShowsLocked()
+	l.mu.Unlock()
+
+	if l.meta != nil && l.meta.Enabled() {
+		l.enrich(ctx, refresh)
+	}
+	l.makeThumbnails()
+	l.saveSoon.Trigger()
+	return ctx.Err()
+}
+
+// foundVideo is a video file seen by a scan, before it is merged into the items.
+type foundVideo struct {
+	file, rel, id string
+	st            os.FileInfo
+	subFiles      []string
+}
+
+// findVideos walks the media folder and returns its videos with their
+// subtitles. It stats files without holding the lock.
+func (l *Library) findVideos() ([]foundVideo, error) {
 	var files []string
 	if err := walk(l.cfg.MediaDir, &files); err != nil {
-		return err
+		return nil, err
 	}
 	var videos []string
 	videosByDir := map[string]int{}
@@ -270,35 +317,29 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 		}
 	}
 	idx := buildSubIndex(l.cfg.MediaDir, files)
-	if refresh {
-		l.artMu.Lock()
-		l.artVer = map[string]int64{}
-		l.artMu.Unlock()
-	}
-
-	// Stat and match subtitles without the lock; only the item updates need it.
-	type scanned struct {
-		file, rel, id string
-		st            os.FileInfo
-		subFiles      []string
-	}
-	var found []scanned
+	var found []foundVideo
 	for _, file := range videos {
 		st, err := os.Stat(file)
 		if err != nil {
 			continue
 		}
 		// Skip trailers and samples bundled with releases.
-		if sampleRe.MatchString(filepath.Base(file)) && st.Size() < 200*1024*1024 {
+		if sampleRe.MatchString(filepath.Base(file)) && st.Size() < maxSampleSize {
 			continue
 		}
 		rel, _ := filepath.Rel(l.cfg.MediaDir, file)
-		found = append(found, scanned{file: file, rel: rel, id: IDFor(rel), st: st, subFiles: l.findSubtitles(file, idx, videosByDir)})
+		found = append(found, foundVideo{file: file, rel: rel, id: IDFor(rel), st: st, subFiles: l.findSubtitles(file, idx, videosByDir)})
 	}
+	return found, nil
+}
 
+// mergeItems updates the items from found, drops items whose file is gone and
+// returns the items that need probing (new, changed or never probed).
+func (l *Library) mergeItems(found []foundVideo) []*model.Item {
 	seen := map[string]bool{}
 	var toProbe []*model.Item
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	for _, f := range found {
 		seen[f.id] = true
 		mtime := float64(f.st.ModTime().UnixMilli())
@@ -323,10 +364,15 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 			delete(l.items, id)
 		}
 	}
-	l.status = model.ScanStatus{Scanning: true, Phase: "Analyzing media", Total: len(toProbe)}
-	l.mu.Unlock()
+	return toProbe
+}
 
-	mapLimit(toProbe, 3, func(item *model.Item) {
+// probeAll reads the streams of each item with ffprobe.
+func (l *Library) probeAll(ctx context.Context, items []*model.Item) {
+	l.setStatus(func(s *model.ScanStatus) {
+		*s = model.ScanStatus{Scanning: true, Phase: "Analyzing media", Total: len(items)}
+	})
+	mapLimit(items, probeWorkers, func(item *model.Item) {
 		defer l.bump()
 		info, err := probe.Probe(ctx, item.Path)
 		if err != nil {
@@ -336,8 +382,10 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 		item.Info = info
 		l.mu.Unlock()
 	})
+}
 
-	l.mu.Lock()
+// updatePlaybackLocked recomputes direct play and subtitle tracks of probed items.
+func (l *Library) updatePlaybackLocked() {
 	caps := probe.CapsForModel("")
 	for _, item := range l.items {
 		if item.Info == nil {
@@ -346,7 +394,11 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 		item.DirectPlay = probe.CanDirectPlay(item.Path, item.Info, caps)
 		item.Subs = buildSubs(item)
 	}
-	// Shows are derived from episodes' parsed names.
+}
+
+// deriveShowsLocked rebuilds the show list from the episodes' parsed names,
+// keeping the metadata of shows that still have episodes.
+func (l *Library) deriveShowsLocked() {
 	keep := map[string]bool{}
 	for _, item := range l.items {
 		if item.Parsed.Type != model.TypeEpisode {
@@ -363,24 +415,19 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 			delete(l.shows, key)
 		}
 	}
-	l.mu.Unlock()
-
-	if l.meta != nil && l.meta.Enabled() {
-		l.enrich(ctx, refresh)
-	}
-	l.makeThumbnails()
-	l.saveSoon.Trigger()
-	return ctx.Err()
-}
-
-func stale(refresh bool, triedAt int64, hasMeta bool) bool {
-	return refresh || triedAt == 0 || (!hasMeta && time.Now().UnixMilli()-triedAt > retryMetaMS)
 }
 
 // needsLookup reports whether an item or show should be sent to TMDB. A refresh
-// re-fetches everything; otherwise only unmatched entries that are stale.
+// re-fetches everything; otherwise only unmatched entries that were never tried
+// or were last tried more than retryMeta ago.
 func needsLookup(refresh bool, triedAt int64, hasMeta bool) bool {
-	return refresh || (!hasMeta && stale(false, triedAt, false))
+	if refresh {
+		return true
+	}
+	if hasMeta {
+		return false
+	}
+	return triedAt == 0 || time.Since(time.UnixMilli(triedAt)) > retryMeta
 }
 
 func (l *Library) artPath(key, kind string) string {
@@ -470,7 +517,7 @@ func (l *Library) enrich(ctx context.Context, refresh bool) {
 		*s = model.ScanStatus{Scanning: true, Phase: "Fetching metadata", Total: len(movies) + len(shows)}
 	})
 
-	mapLimit(movies, 4, func(it *model.Item) {
+	mapLimit(movies, metadataWorkers, func(it *model.Item) {
 		defer l.bump()
 		l.enrichMovie(ctx, it)
 	})
@@ -550,7 +597,7 @@ func (l *Library) makeThumbnails() {
 		*s = model.ScanStatus{Scanning: true, Phase: "Creating thumbnails", Total: len(need)}
 	})
 
-	mapLimit(need, 2, func(it *model.Item) {
+	mapLimit(need, thumbnailWorkers, func(it *model.Item) {
 		defer l.bump()
 		at := math.Max(1, math.Min(it.Info.Duration*0.1, 600))
 		p := l.artPath(it.ID, "backdrop")
@@ -566,8 +613,8 @@ func (l *Library) makeThumbnails() {
 	})
 }
 
-// SetProgress records a playback position. Positions past 92% (or within 120 s
-// of the end) mark the item watched.
+// SetProgress records a playback position. Positions past watchedFraction of
+// the duration (or within watchedTail seconds of the end) mark the item watched.
 func (l *Library) SetProgress(id string, pos, dur float64) {
 	l.mu.Lock()
 	it, ok := l.items[id]
@@ -579,7 +626,7 @@ func (l *Library) SetProgress(id string, pos, dur float64) {
 		dur = it.Info.Duration
 	}
 	now := time.Now().UnixMilli()
-	if dur > 0 && (pos/dur > 0.92 || dur-pos < 120) {
+	if dur > 0 && (pos/dur > watchedFraction || dur-pos < watchedTail) {
 		l.progress[id] = model.Progress{Pos: 0, Dur: dur, Watched: true, T: now}
 	} else {
 		l.progress[id] = model.Progress{Pos: int(pos), Dur: dur, T: now}
@@ -650,7 +697,7 @@ func (l *Library) publicItem(it *model.Item) model.PublicItem {
 	p := it.Parsed
 	pi := model.PublicItem{
 		ID: it.ID, Type: p.Type, Overview: meta.Overview, Tagline: meta.Tagline, Rating: meta.Rating,
-		Genres: orEmpty(meta.Genres), Cast: orEmptyCast(meta.Cast), Duration: it.Info.Duration,
+		Genres: orEmpty(meta.Genres), Cast: orEmpty(meta.Cast), Duration: it.Info.Duration,
 		Added: it.Added, Size: it.Size, File: filepath.Base(it.Path),
 		Poster: l.artURL(it.ID, "poster", it.Art.Poster), Backdrop: l.artURL(it.ID, "backdrop", it.Art.Backdrop),
 		Video: it.Info.Video, Audio: it.Info.Audio, PlayMode: "transcode", Subs: []model.PublicSub{},
@@ -695,18 +742,12 @@ func (l *Library) publicItem(it *model.Item) model.PublicItem {
 	return pi
 }
 
-func orEmpty(s []string) []string {
+// orEmpty turns a nil slice into an empty one so it encodes as [] rather than null.
+func orEmpty[T any](s []T) []T {
 	if s == nil {
-		return []string{}
+		return []T{}
 	}
 	return s
-}
-
-func orEmptyCast(c []model.CastMember) []model.CastMember {
-	if c == nil {
-		return []model.CastMember{}
-	}
-	return c
 }
 
 // Snapshot builds the GET /api/library response.
@@ -749,7 +790,7 @@ func (l *Library) Snapshot() model.Snapshot {
 			if m.Year != nil {
 				ps.Year = m.Year
 			}
-			ps.Overview, ps.Rating, ps.Genres, ps.Cast = m.Overview, m.Rating, orEmpty(m.Genres), orEmptyCast(m.Cast)
+			ps.Overview, ps.Rating, ps.Genres, ps.Cast = m.Overview, m.Rating, orEmpty(m.Genres), orEmpty(m.Cast)
 		}
 		ps.Poster = l.artURL("show-"+s.Key, "poster", s.Art.Poster)
 		ps.Backdrop = l.artURL("show-"+s.Key, "backdrop", s.Art.Backdrop)

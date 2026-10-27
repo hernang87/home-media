@@ -94,8 +94,15 @@ func TestProgressWatchedAndPersistence(t *testing.T) {
 }
 
 func TestIDForAndSlug(t *testing.T) {
-	if IDFor("a/b.mkv") != IDFor("a/b.mkv") || len(IDFor("x")) != 12 {
-		t.Error("IDFor must be stable and 12 chars")
+	// IDs are stored in library.json and state.json, so they must never change.
+	if got := IDFor("a/b.mkv"); got != "974199ef0e3c" {
+		t.Errorf("IDFor = %q, want 974199ef0e3c", got)
+	}
+	if IDFor("Amélie.mkv") != IDFor("Amélie.mkv") {
+		t.Error("IDFor must normalize to NFC")
+	}
+	if IDFor("a.mkv") == IDFor("b.mkv") {
+		t.Error("IDFor must differ for different paths")
 	}
 	if got := Slug("Amélie: The Show!"); got != "amelie-the-show" {
 		t.Errorf("Slug = %q", got)

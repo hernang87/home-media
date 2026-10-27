@@ -28,7 +28,7 @@ func TestConcurrentEnsureDialsOnce(t *testing.T) {
 func TestSetBaseChangesLoadURLs(t *testing.T) {
 	m := NewManager(&fakeLib{}, "http://192.168.1.10:8200")
 	m.SetBase("http://10.0.0.5:8200/")
-	spec, err := m.BuildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{})
+	spec, err := m.buildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

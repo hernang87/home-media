@@ -40,7 +40,7 @@ func NewPhone(a *App) *phoneScreen {
 	p.note.Alignment = fyne.TextAlignCenter
 	p.note.Wrapping = fyne.TextWrapWord
 	p.copy = widget.NewButtonWithIcon("Copy address", theme.ContentCopyIcon(), func() {
-		a.Win.Clipboard().SetContent(p.url.Text)
+		a.Fyne.Clipboard().SetContent(p.url.Text)
 	})
 	p.copy.Hide()
 	p.body = container.NewCenter(container.NewVBox(

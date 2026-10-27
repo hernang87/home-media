@@ -54,7 +54,7 @@ func NewLogs(a *App) fyne.CanvasObject {
 		l.render()
 	})
 	cp := widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
-		a.Win.Clipboard().SetContent(l.text())
+		a.Fyne.Clipboard().SetContent(l.text())
 	})
 	bar := container.NewBorder(nil, nil, nil, container.NewHBox(follow, clear, cp), levels)
 

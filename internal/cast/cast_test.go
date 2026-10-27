@@ -71,7 +71,7 @@ func ctx(t *testing.T) context.Context {
 
 func TestBuildLoadDirectAndHLS(t *testing.T) {
 	m := NewManager(&fakeLib{}, "http://192.168.1.10:8200/")
-	direct, err := m.BuildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "e0", Start: 12})
+	direct, err := m.buildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "e0", Start: 12})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestBuildLoadDirectAndHLS(t *testing.T) {
 		t.Errorf("start = %v", direct.payload["currentTime"])
 	}
 
-	hls, err := m.BuildLoad(testItem("a.mkv", h264, aac, aac), "Chromecast", PlayRequest{Audio: 1})
+	hls, err := m.buildLoad(testItem("a.mkv", h264, aac, aac), "Chromecast", PlayRequest{Audio: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,10 +98,10 @@ func TestBuildLoadDirectAndHLS(t *testing.T) {
 	if media["contentId"] != "http://192.168.1.10:8200/hls/abc123/1/index.m3u8" || media["contentType"] != "application/x-mpegURL" || hls.mode != "transcode" {
 		t.Errorf("hls media = %v", media)
 	}
-	if _, err := m.BuildLoad(testItem("a.mkv", h264, aac), "Chromecast", PlayRequest{Mode: "direct"}); err == nil {
+	if _, err := m.buildLoad(testItem("a.mkv", h264, aac), "Chromecast", PlayRequest{Mode: "direct"}); err == nil {
 		t.Error("forcing direct on an mkv must fail")
 	}
-	if _, err := m.BuildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "nope"}); err == nil {
+	if _, err := m.buildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "nope"}); err == nil {
 		t.Error("unknown subtitle must fail")
 	}
 }

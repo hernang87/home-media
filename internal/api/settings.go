@@ -41,7 +41,7 @@ type SettingsStore interface {
 
 func (h *handlers) settings(w http.ResponseWriter, r *http.Request) {
 	if h.d.Settings == nil {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	v := h.d.Settings.Settings()
@@ -51,7 +51,7 @@ func (h *handlers) settings(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if h.d.Settings == nil {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	if !isThisMachine(r.RemoteAddr) {

@@ -30,7 +30,6 @@ var (
 	reID    = regexp.MustCompile(`^\w+$`)
 	reArtID = regexp.MustCompile(`^[\w-]+$`)
 	reDigit = regexp.MustCompile(`^[0-9]+$`)
-	reSeg   = regexp.MustCompile(`^seg([0-9]+)\.ts$`)
 )
 
 // handlers holds the dependencies of the route handlers.
@@ -76,6 +75,8 @@ func writeText(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, msg)
 }
+
+func notFound(w http.ResponseWriter) { writeText(w, http.StatusNotFound, "Not found") }
 
 // parseDigits accepts only ASCII digits.
 func parseDigits(s string) (int, bool) {
@@ -176,7 +177,7 @@ func (h *handlers) progress(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) art(w http.ResponseWriter, r *http.Request) {
 	id, kind := r.PathValue("id"), r.PathValue("kind")
 	if h.d.Config == nil || !reArtID.MatchString(id) || (kind != "poster" && kind != "backdrop") {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	// Items without a poster fall back to their video frame.
@@ -185,7 +186,7 @@ func (h *handlers) art(w http.ResponseWriter, r *http.Request) {
 		f, fi, err = openRegular(filepath.Join(h.d.Config.ArtDir, id+".backdrop.jpg"))
 	}
 	if err != nil {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	defer f.Close()
@@ -196,12 +197,12 @@ func (h *handlers) file(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	item, ok := h.lookup(id)
 	if !ok {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	f, fi, err := openRegular(item.Path)
 	if err != nil {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	defer f.Close()
@@ -232,12 +233,12 @@ func validAudio(item model.Item, audio int) bool {
 func (h *handlers) playlist(w http.ResponseWriter, r *http.Request) {
 	audio, ok := parseDigits(r.PathValue("audio"))
 	if !ok {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	item, ok := h.lookup(r.PathValue("id"))
 	if !ok || item.Info == nil || !validAudio(item, audio) {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -248,22 +249,17 @@ func (h *handlers) playlist(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) segment(w http.ResponseWriter, r *http.Request) {
 	audio, ok := parseDigits(r.PathValue("audio"))
 	if !ok {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
-	m := reSeg.FindStringSubmatch(r.PathValue("seg"))
-	if m == nil {
-		writeText(w, http.StatusNotFound, "Not found")
-		return
-	}
-	n, ok := parseDigits(m[1])
+	n, ok := transcode.ParseSegmentName(r.PathValue("seg"))
 	if !ok {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	item, ok := h.lookup(r.PathValue("id"))
 	if !ok || item.Info == nil || !validAudio(item, audio) || n >= transcode.SegmentCount(item.Info.Duration) {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	path, err := h.d.TX.Segment(r.Context(), item, audio, n)
@@ -277,7 +273,7 @@ func (h *handlers) segment(w http.ResponseWriter, r *http.Request) {
 	}
 	f, fi, err := openRegular(path)
 	if err != nil {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	defer f.Close()
@@ -287,12 +283,12 @@ func (h *handlers) segment(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) subtitle(w http.ResponseWriter, r *http.Request) {
 	name, ok := strings.CutSuffix(r.PathValue("subfile"), ".vtt")
 	if !ok || !reID.MatchString(name) {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	item, ok := h.lookup(r.PathValue("id"))
 	if !ok {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	var track *model.SubTrack
@@ -303,7 +299,7 @@ func (h *handlers) subtitle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if track == nil {
-		writeText(w, http.StatusNotFound, "Not found")
+		notFound(w)
 		return
 	}
 	vtt, err := subs.LoadVTT(item.Path, *track)

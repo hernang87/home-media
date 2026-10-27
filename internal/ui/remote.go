@@ -86,7 +86,7 @@ func (r *remoteScreen) build() {
 	back := widget.NewButton("-10s", func() { r.seekTo(r.st.Position - 10) })
 	fwd := widget.NewButton("+10s", func() { r.seekTo(r.st.Position + 10) })
 	r.playPause = widget.NewButton("Play", func() {
-		if r.st.State == "PLAYING" {
+		if r.st.State == model.StatePlaying {
 			r.control("pause", nil)
 		} else {
 			r.control("resume", nil)
@@ -204,7 +204,7 @@ func (r *remoteScreen) apply(st client.CastStatus) {
 		}
 	}
 	r.title.SetText(title)
-	r.state.SetText(st.State)
+	r.state.SetText(string(st.State))
 	if st.Error != "" {
 		r.errMsg.SetText(st.Error)
 		r.errMsg.Show()
@@ -226,7 +226,7 @@ func (r *remoteScreen) apply(st client.CastStatus) {
 	}
 	r.mute.SetChecked(st.Muted)
 
-	if st.State == "PLAYING" {
+	if st.State == model.StatePlaying {
 		r.playPause.SetText("Pause")
 	} else {
 		r.playPause.SetText("Play")

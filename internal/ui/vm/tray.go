@@ -23,20 +23,18 @@ func (t Tray) ToggleAction() string {
 // TrayStatus summarizes st for the menu bar. title is the playing item's title
 // ("" when unknown).
 func TrayStatus(st model.CastStatus, title string) Tray {
-	switch st.State {
-	case "PLAYING", "PAUSED", "BUFFERING", "LOADING":
-	default:
+	if !st.State.Active() && st.State != model.StateLoading {
 		return Tray{Label: "Nothing playing", ToggleText: "Pause"}
 	}
 	if title == "" {
 		title = "Unknown title"
 	}
-	t := Tray{Active: true, Playing: st.State == "PLAYING", ToggleText: "Resume"}
+	t := Tray{Active: true, Playing: st.State == model.StatePlaying, ToggleText: "Resume"}
 	state := "Paused"
 	switch st.State {
-	case "PLAYING":
+	case model.StatePlaying:
 		state, t.ToggleText = "Playing", "Pause"
-	case "BUFFERING", "LOADING":
+	case model.StateBuffering, model.StateLoading:
 		state = "Loading"
 	}
 	t.Label = title + " · " + state

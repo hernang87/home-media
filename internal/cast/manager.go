@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,8 +29,20 @@ type Library interface {
 	Progress(id string) (model.Progress, bool)
 }
 
-// minResume is the shortest saved position (seconds) worth asking about.
-const minResume = 30
+const (
+	// minResume is the shortest saved position (seconds) worth asking about.
+	minResume = 30
+	// deviceTTL is how long a device stays listed after it was last seen.
+	deviceTTL = 3 * time.Minute
+	// pinnedTTL keeps manually added devices listed for good.
+	pinnedTTL = 100 * 365 * 24 * time.Hour
+	// browseFor and browseEvery set how long each mDNS browse runs and the pause between them.
+	browseFor   = 6 * time.Second
+	browseEvery = 20 * time.Second
+	// directContentType is sent for direct play; only MP4-family files play directly
+	// (see probe.castVideoContainers).
+	directContentType = "video/mp4"
+)
 
 // Manager owns device discovery and one session per device.
 type Manager struct {
@@ -77,7 +90,7 @@ func (m *Manager) onStop(itemID string) {
 // AddDevice registers a device manually (tests, or a static address).
 func (m *Manager) AddDevice(d Device) {
 	m.mu.Lock()
-	m.devices[d.ID] = &deviceEntry{Device: d, seen: time.Now().Add(100 * 365 * 24 * time.Hour)}
+	m.devices[d.ID] = &deviceEntry{Device: d, seen: time.Now().Add(pinnedTTL)}
 	m.mu.Unlock()
 }
 
@@ -87,20 +100,14 @@ func (m *Manager) Devices() []Device {
 	defer m.mu.Unlock()
 	out := []Device{}
 	for _, e := range m.devices {
-		if time.Since(e.seen) < 3*time.Minute {
+		if time.Since(e.seen) < deviceTTL {
 			out = append(out, e.Device)
 		}
 	}
-	sortDevices(out)
+	slices.SortStableFunc(out, func(a, b Device) int {
+		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
 	return out
-}
-
-func sortDevices(d []Device) {
-	for i := 1; i < len(d); i++ {
-		for j := i; j > 0 && strings.ToLower(d[j].Name) < strings.ToLower(d[j-1].Name); j-- {
-			d[j], d[j-1] = d[j-1], d[j]
-		}
-	}
 }
 
 // Run browses for Chromecasts until ctx is cancelled, then closes all sessions.
@@ -113,13 +120,13 @@ func (m *Manager) Run(ctx context.Context) {
 		m.mu.Unlock()
 	}()
 	for {
-		if err := m.browse(ctx, 6*time.Second); err != nil && ctx.Err() == nil {
+		if err := m.browse(ctx, browseFor); err != nil && ctx.Err() == nil {
 			slog.Warn("chromecast discovery failed", "err", err)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(20 * time.Second):
+		case <-time.After(browseEvery):
 		}
 	}
 }
@@ -252,78 +259,102 @@ type loadSpec struct {
 	duration  float64
 }
 
-// BuildLoad builds the LOAD message for item on a device model. Exported for tests.
-func (m *Manager) BuildLoad(item model.Item, deviceModel string, req PlayRequest) (loadSpec, error) {
+// buildLoad builds the LOAD message for item on a device model.
+func (m *Manager) buildLoad(item model.Item, deviceModel string, req PlayRequest) (loadSpec, error) {
 	if item.Info == nil || item.Info.Video == nil {
 		return loadSpec{}, badRequest("item has no video")
 	}
-	mode := req.Mode
+	base := m.baseURL()
+	st, err := chooseStream(base, item, deviceModel, req)
+	if err != nil {
+		return loadSpec{}, err
+	}
+	tracks, trackSubs, active, err := subtitleTracks(base, item, req.Sub)
+	if err != nil {
+		return loadSpec{}, err
+	}
+	spec := loadSpec{trackSubs: trackSubs, audio: st.audio, mode: st.mode, start: req.Start, duration: item.Info.Duration}
+	if len(active) > 0 {
+		spec.activeSub = req.Sub
+	}
+	spec.payload = map[string]any{
+		"type": "LOAD", "autoplay": true, "currentTime": req.Start,
+		"media": mediaInfo(base, item, st, tracks), "activeTrackIds": active,
+	}
+	return spec, nil
+}
+
+// stream is where the receiver fetches the video from, and how.
+type stream struct {
+	url, contentType string
+	mode             string // direct | transcode
+	audio            int
+}
+
+// chooseStream picks direct play or HLS for req.Mode ("direct", "transcode",
+// or anything else for whatever the device can play).
+func chooseStream(base string, item model.Item, deviceModel string, req PlayRequest) (stream, error) {
 	direct := probe.CanDirectPlay(item.Path, item.Info, probe.CapsForModel(deviceModel))
-	switch mode {
+	switch req.Mode {
 	case "direct":
 		if !direct {
-			return loadSpec{}, badRequest("this file cannot be played directly on this device")
+			return stream{}, badRequest("this file cannot be played directly on this device")
 		}
 	case "transcode":
 		direct = false
-	default:
-		mode = "auto"
 	}
-	base := m.baseURL()
-	var url, ctype string
 	if direct {
-		url, ctype, mode = fmt.Sprintf("%s/file/%s", base, item.ID), contentTypeForFile(item.Path), "direct"
-	} else {
-		if req.Audio < 0 || (len(item.Info.Audio) > 0 && req.Audio >= len(item.Info.Audio)) {
-			return loadSpec{}, badRequest("audio track %d does not exist", req.Audio)
-		}
-		url, ctype, mode = fmt.Sprintf("%s/hls/%s/%d/index.m3u8", base, item.ID, req.Audio), "application/x-mpegURL", "transcode"
+		return stream{url: fmt.Sprintf("%s/file/%s", base, item.ID), contentType: directContentType, mode: "direct"}, nil
 	}
+	if req.Audio < 0 || (len(item.Info.Audio) > 0 && req.Audio >= len(item.Info.Audio)) {
+		return stream{}, badRequest("audio track %d does not exist", req.Audio)
+	}
+	return stream{
+		url:         fmt.Sprintf("%s/hls/%s/%d/index.m3u8", base, item.ID, req.Audio),
+		contentType: "application/x-mpegURL", mode: "transcode", audio: req.Audio,
+	}, nil
+}
 
-	spec := loadSpec{trackSubs: map[int]string{}, audio: req.Audio, mode: mode, start: req.Start, duration: item.Info.Duration}
-	if direct {
-		spec.audio = 0
-	}
-	tracks := []map[string]any{}
-	active := []int{}
-	for i, sub := range item.Subs {
+// subtitleTracks lists item's subtitles as Cast text tracks, maps each track
+// ID back to its sub ID, and returns the track ID of sub (none when sub is "").
+func subtitleTracks(base string, item model.Item, sub string) (tracks []map[string]any, trackSubs map[int]string, active []int, err error) {
+	tracks, trackSubs, active = []map[string]any{}, map[int]string{}, []int{}
+	for i, s := range item.Subs {
 		tid := i + 1
-		spec.trackSubs[tid] = sub.ID
+		trackSubs[tid] = s.ID
 		t := map[string]any{
 			"trackId": tid, "type": "TEXT", "subtype": "SUBTITLES",
-			"trackContentId":   fmt.Sprintf("%s/sub/%s/%s.vtt", base, item.ID, sub.ID),
-			"trackContentType": "text/vtt", "name": sub.Label,
+			"trackContentId":   fmt.Sprintf("%s/sub/%s/%s.vtt", base, item.ID, s.ID),
+			"trackContentType": "text/vtt", "name": s.Label,
 		}
-		if sub.Lang != "" {
-			t["language"] = sub.Lang
+		if s.Lang != "" {
+			t["language"] = s.Lang
 		}
 		tracks = append(tracks, t)
-		if sub.ID == req.Sub {
+		if s.ID == sub {
 			active = append(active, tid)
-			spec.activeSub = sub.ID
 		}
 	}
-	if req.Sub != "" && spec.activeSub == "" {
-		return loadSpec{}, badRequest("unknown subtitle %q", req.Sub)
+	if sub != "" && len(active) == 0 {
+		return nil, nil, nil, badRequest("unknown subtitle %q", sub)
 	}
+	return tracks, trackSubs, active, nil
+}
 
+// mediaInfo is the LOAD message's media object.
+func mediaInfo(base string, item model.Item, st stream, tracks []map[string]any) map[string]any {
 	meta := map[string]any{"metadataType": 0, "title": titleFor(item)}
 	if item.Art.Backdrop {
 		meta["images"] = []map[string]any{{"url": fmt.Sprintf("%s/art/%s/backdrop", base, item.ID)}}
 	}
-	media := map[string]any{
-		"contentId": url, "contentType": ctype, "streamType": "BUFFERED",
+	return map[string]any{
+		"contentId": st.url, "contentType": st.contentType, "streamType": "BUFFERED",
 		"duration": item.Info.Duration, "metadata": meta, "tracks": tracks,
 		"textTrackStyle": map[string]any{
 			"foregroundColor": "#FFFFFFFF", "backgroundColor": "#00000000",
 			"edgeType": "OUTLINE", "edgeColor": "#000000FF", "fontScale": 1.0,
 		},
 	}
-	spec.payload = map[string]any{
-		"type": "LOAD", "autoplay": true, "currentTime": req.Start,
-		"media": media, "activeTrackIds": active,
-	}
-	return spec, nil
 }
 
 func titleFor(item model.Item) string {
@@ -367,7 +398,7 @@ func (m *Manager) Play(ctx context.Context, deviceKey string, req PlayRequest) e
 			req.Start = float64(pr.Pos)
 		}
 	}
-	spec, err := m.BuildLoad(item, dev.Model, req)
+	spec, err := m.buildLoad(item, dev.Model, req)
 	if err != nil {
 		return err
 	}
