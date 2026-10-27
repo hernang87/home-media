@@ -3,3 +3,4 @@
 /bin/
 /testdata/fixtures/
 .DS_Store
+/graphify-out/
