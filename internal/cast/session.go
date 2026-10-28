@@ -20,6 +20,7 @@ const (
 	deadAfter      = 20 * time.Second
 	saveEvery      = 10 * time.Second
 	loadTimeout    = 40 * time.Second // HLS has to transcode its first segment
+	statusWait     = 1500 * time.Millisecond
 )
 
 // Status is what clients see for a device.
@@ -92,26 +93,53 @@ func (s *session) waitFor(ctx context.Context, c *conn, timeout time.Duration, c
 
 // ensure connects (if needed) and makes sure the Default Media Receiver runs.
 func (s *session) ensure(ctx context.Context) error {
-	if err := s.connect(); err != nil {
+	if _, err := s.connect(); err != nil {
 		return err
 	}
 	return s.ensureApp(ctx)
 }
 
-// connect dials the device unless a connection exists. dialMu makes concurrent
-// callers share one dial instead of leaking the connection that loses the race.
-func (s *session) connect() error {
+// rejoin reconnects after a dropped connection and picks up the app and media
+// session the receiver is already running. Unlike ensure, it never launches the app.
+func (s *session) rejoin(ctx context.Context) error {
+	if s.connected() {
+		return nil
+	}
+	c, err := s.connect()
+	if err != nil {
+		return err
+	}
+	running, err := s.askStatus(ctx, c, nsReceiver, receiverID, s.hasApp)
+	if err != nil || !running {
+		return err // with no app, receiver commands such as volume still work
+	}
+	s.mu.Lock()
+	transport := s.transportID
+	s.mu.Unlock()
+	_, err = s.askStatus(ctx, c, nsMedia, transport, s.hasMedia)
+	return err
+}
+
+func (s *session) connected() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.c != nil
+}
+
+// connect returns the connection, dialing the device if there is none. dialMu makes
+// concurrent callers share one dial instead of leaking the connection that loses the race.
+func (s *session) connect() (*conn, error) {
 	s.dialMu.Lock()
 	defer s.dialMu.Unlock()
 	s.mu.Lock()
 	c, dev := s.c, s.dev
 	s.mu.Unlock()
 	if c != nil {
-		return nil
+		return c, nil
 	}
 	nc, err := dial(dev.Addr, dev.Port, 5*time.Second)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.mu.Lock()
 	s.c, s.lastRx = nc, time.Now()
@@ -123,12 +151,29 @@ func (s *session) connect() error {
 	go s.heartbeat(nc)
 	if _, err := nc.send(nsConnection, receiverID, map[string]any{"type": "CONNECT"}); err != nil {
 		s.drop(nc)
-		return err
+		return nil, err
 	}
-	return nil
+	return nc, nil
 }
 
-func (s *session) hasApp() bool { return s.transportID != "" }
+func (s *session) hasApp() bool   { return s.transportID != "" }
+func (s *session) hasMedia() bool { return s.mediaID != 0 }
+
+// askStatus sends GET_STATUS to dst and waits briefly for cond (called with s.mu
+// held). It reports false, without an error, when cond is still false after statusWait.
+func (s *session) askStatus(ctx context.Context, c *conn, ns, dst string, cond func() bool) (bool, error) {
+	if _, err := c.send(ns, dst, map[string]any{"type": "GET_STATUS"}); err != nil {
+		return false, err
+	}
+	switch err := s.waitFor(ctx, c, statusWait, cond); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, errTimeout):
+		return false, nil
+	default:
+		return false, err
+	}
+}
 
 func (s *session) ensureApp(ctx context.Context) error {
 	s.mu.Lock()
@@ -141,13 +186,7 @@ func (s *session) ensureApp(ctx context.Context) error {
 		return errClosed
 	}
 	// The receiver may already run it; ask, then launch if it does not show up.
-	if _, err := c.send(nsReceiver, receiverID, map[string]any{"type": "GET_STATUS"}); err != nil {
-		return err
-	}
-	switch err := s.waitFor(ctx, c, 1500*time.Millisecond, s.hasApp); {
-	case err == nil:
-		return nil
-	case !errors.Is(err, errTimeout):
+	if running, err := s.askStatus(ctx, c, nsReceiver, receiverID, s.hasApp); err != nil || running {
 		return err
 	}
 	if _, err := c.send(nsReceiver, receiverID, map[string]any{"type": "LAUNCH", "appId": defaultReceiverApp}); err != nil {
@@ -503,6 +542,9 @@ func (t controlTarget) sendMedia(p map[string]any) error {
 }
 
 func (s *session) control(ctx context.Context, req ControlRequest) error {
+	if err := s.rejoin(ctx); err != nil {
+		return err
+	}
 	t, err := s.snapshotControl()
 	if err != nil {
 		return err

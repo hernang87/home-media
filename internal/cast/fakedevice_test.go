@@ -31,7 +31,8 @@ type fakeDevice struct {
 	pos      float64
 	active   []int
 	media    map[string]any
-	mediaID  int // a new mediaSessionId per LOAD, like a real receiver
+	mediaID  int  // a new mediaSessionId per LOAD, like a real receiver
+	loaded   bool // media is loaded in the running app
 	conns    []net.Conn
 	accepted atomic.Int32 // connections accepted so far
 	dropOn   string       // message type that makes the device hang up
@@ -83,6 +84,10 @@ func (d *fakeDevice) receiverStatus(c net.Conn, reqID float64) {
 }
 
 func (d *fakeDevice) mediaStatus(c net.Conn, reqID float64, idle string) {
+	if !d.loaded {
+		d.reply(c, nsMedia, "tr-1", senderID, map[string]any{"type": "MEDIA_STATUS", "requestId": reqID, "status": []any{}})
+		return
+	}
 	st := map[string]any{"mediaSessionId": d.mediaID, "playerState": d.state, "currentTime": d.pos, "activeTrackIds": d.active}
 	if idle != "" {
 		st["idleReason"] = idle
@@ -129,14 +134,15 @@ func (d *fakeDevice) handle(c net.Conn) {
 		case m.Namespace == nsReceiver && typ == "GET_STATUS":
 			d.receiverStatus(c, reqID)
 		case m.Namespace == nsReceiver && typ == "LAUNCH":
-			d.appUp = true
+			d.appUp, d.loaded = true, false
 			d.receiverStatus(c, reqID)
 		case m.Namespace == nsReceiver && typ == "STOP":
-			d.appUp, d.state = false, "IDLE"
+			d.appUp, d.loaded, d.state = false, false, "IDLE"
 			d.receiverStatus(c, reqID)
 		case m.Namespace == nsMedia && typ == "LOAD":
 			d.media = p
 			d.mediaID++
+			d.loaded = true
 			d.state = "PLAYING"
 			d.pos, _ = p["currentTime"].(float64)
 			d.active = nil
@@ -178,6 +184,16 @@ func (d *fakeDevice) finish() {
 	}
 }
 
+// hangUp closes every connection, like a Wi-Fi drop; playback carries on.
+func (d *fakeDevice) hangUp() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.conns {
+		c.Close()
+	}
+	d.conns = nil
+}
+
 // hangUpOn makes the device close the connection when it receives typ.
 func (d *fakeDevice) hangUpOn(typ string) {
 	d.mu.Lock()
@@ -195,4 +211,17 @@ func (d *fakeDevice) last(typ string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// count returns how many payloads of a given type the device received.
+func (d *fakeDevice) count(typ string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, p := range d.received {
+		if p["type"] == typ {
+			n++
+		}
+	}
+	return n
 }

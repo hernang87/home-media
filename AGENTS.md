@@ -54,6 +54,7 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 
 - Resume protocol: `POST /api/cast/{device}/play` returns 409 with `{"code":"resume",...}` when saved progress is >= 30 s. The client retries with `"resume":"continue"` or `"resume":"restart"`.
 - Progress is saved every 10 s and on pause, stop and finish.
+- `Status` never connects. Control commands reconnect after a dropped connection and rejoin the running receiver app and media session (`session.rejoin`); only `Play` launches the app.
 - Without `TMDB_API_KEY`, posters are null and the app falls back to the backdrop.
 - Device names in URLs must be percent-encoded, or use the device ID.
 - Do not wrap `slog.Default().Handler()` in a handler passed to `slog.SetDefault` (it recurses); build a fresh handler.

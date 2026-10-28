@@ -61,3 +61,27 @@ func TestDropDuringStartupFailsFast(t *testing.T) {
 		})
 	}
 }
+
+func TestControlRejoinsAfterDrop(t *testing.T) {
+	m, dev, lib := setup(t, testItem("a.mp4", h264, aac))
+	if err := m.Play(ctx(t), "dev1", PlayRequest{ItemID: "abc123", Start: 45}); err != nil {
+		t.Fatal(err)
+	}
+	dev.hangUp()
+	waitFor(t, func() bool { s, _ := m.Status("dev1"); return s.State == model.StateDisconnected })
+
+	if err := m.Control(ctx(t), "dev1", ControlRequest{Action: "pause"}); err != nil {
+		t.Fatalf("pause after drop: %v", err)
+	}
+	if n := dev.accepted.Load(); n != 2 {
+		t.Errorf("device accepted %d connections, want 2", n)
+	}
+	if n := dev.count("LAUNCH"); n != 1 {
+		t.Errorf("receiver app launched %d times, want 1: rejoining must not relaunch it", n)
+	}
+	waitFor(t, func() bool { s, _ := m.Status("dev1"); return s.State == model.StatePaused })
+	if got := dev.last("PAUSE")["mediaSessionId"]; got != 1.0 {
+		t.Errorf("PAUSE mediaSessionId = %v, want the rejoined session 1", got)
+	}
+	waitFor(t, func() bool { v, ok := lib.lastSaved(); return ok && v[0] == "abc123" && v[1].(float64) >= 45 })
+}
