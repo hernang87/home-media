@@ -1,8 +1,12 @@
 package cast
 
 import (
+	"errors"
 	"sync"
 	"testing"
+	"time"
+
+	"homemedia/internal/model"
 )
 
 func TestConcurrentEnsureDialsOnce(t *testing.T) {
@@ -35,5 +39,25 @@ func TestSetBaseChangesLoadURLs(t *testing.T) {
 	media := spec.payload["media"].(map[string]any)
 	if media["contentId"] != "http://10.0.0.5:8200/file/abc123" {
 		t.Errorf("contentId = %v", media["contentId"])
+	}
+}
+
+func TestDropDuringStartupFailsFast(t *testing.T) {
+	for _, step := range []string{"GET_STATUS", "LAUNCH", "LOAD"} {
+		t.Run(step, func(t *testing.T) {
+			m, dev, _ := setup(t, testItem("a.mp4", h264, aac))
+			dev.hangUpOn(step)
+			start := time.Now()
+			err := m.Play(ctx(t), "dev1", PlayRequest{ItemID: "abc123"})
+			if !errors.Is(err, errClosed) {
+				t.Fatalf("err = %v, want errClosed", err)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("Play took %v after the device hung up", d)
+			}
+			if st, _ := m.Status("dev1"); st.State != model.StateDisconnected {
+				t.Errorf("state = %s, want DISCONNECTED", st.State)
+			}
+		})
 	}
 }

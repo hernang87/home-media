@@ -34,6 +34,7 @@ type fakeDevice struct {
 	mediaID  int // a new mediaSessionId per LOAD, like a real receiver
 	conns    []net.Conn
 	accepted atomic.Int32 // connections accepted so far
+	dropOn   string       // message type that makes the device hang up
 }
 
 func newFakeDevice(t *testing.T) *fakeDevice {
@@ -118,6 +119,10 @@ func (d *fakeDevice) handle(c net.Conn) {
 
 		d.mu.Lock()
 		d.received = append(d.received, p)
+		if typ == d.dropOn {
+			d.mu.Unlock()
+			return
+		}
 		switch {
 		case m.Namespace == nsHeartbeat && typ == "PING":
 			d.reply(c, nsHeartbeat, receiverID, senderID, map[string]any{"type": "PONG"})
@@ -171,6 +176,13 @@ func (d *fakeDevice) finish() {
 	for _, c := range d.conns {
 		d.mediaStatus(c, 0, "FINISHED")
 	}
+}
+
+// hangUpOn makes the device close the connection when it receives typ.
+func (d *fakeDevice) hangUpOn(typ string) {
+	d.mu.Lock()
+	d.dropOn = typ
+	d.mu.Unlock()
 }
 
 // last returns the most recent payload of a given type, or nil.

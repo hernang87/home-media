@@ -61,8 +61,11 @@ func (s *session) notifyLocked() {
 	s.changed = make(chan struct{})
 }
 
-// waitFor blocks until cond (called with s.mu held) is true.
-func (s *session) waitFor(ctx context.Context, timeout time.Duration, cond func() bool) error {
+var errTimeout = errors.New("timed out waiting for the chromecast")
+
+// waitFor blocks until cond (called with s.mu held) is true. It fails with
+// errClosed as soon as c is no longer the session's connection.
+func (s *session) waitFor(ctx context.Context, c *conn, timeout time.Duration, cond func() bool) error {
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	for {
@@ -71,12 +74,16 @@ func (s *session) waitFor(ctx context.Context, timeout time.Duration, cond func(
 			s.mu.Unlock()
 			return nil
 		}
+		if s.c != c {
+			s.mu.Unlock()
+			return errClosed
+		}
 		ch := s.changed
 		s.mu.Unlock()
 		select {
 		case <-ch:
 		case <-t.C:
-			return errors.New("timed out waiting for the chromecast")
+			return errTimeout
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -137,13 +144,16 @@ func (s *session) ensureApp(ctx context.Context) error {
 	if _, err := c.send(nsReceiver, receiverID, map[string]any{"type": "GET_STATUS"}); err != nil {
 		return err
 	}
-	if s.waitFor(ctx, 1500*time.Millisecond, s.hasApp) == nil {
+	switch err := s.waitFor(ctx, c, 1500*time.Millisecond, s.hasApp); {
+	case err == nil:
 		return nil
+	case !errors.Is(err, errTimeout):
+		return err
 	}
 	if _, err := c.send(nsReceiver, receiverID, map[string]any{"type": "LAUNCH", "appId": defaultReceiverApp}); err != nil {
 		return err
 	}
-	return s.waitFor(ctx, 15*time.Second, s.hasApp)
+	return s.waitFor(ctx, c, 15*time.Second, s.hasApp)
 }
 
 // drop tears down c if it is still the current connection.
@@ -406,7 +416,7 @@ func (s *session) play(ctx context.Context, item model.Item, load loadSpec) erro
 	s.loadReq = id
 	s.mu.Unlock()
 
-	err = s.waitFor(ctx, loadTimeout, func() bool {
+	err = s.waitFor(ctx, c, loadTimeout, func() bool {
 		if s.loadErr != "" {
 			return true
 		}
@@ -418,7 +428,10 @@ func (s *session) play(ctx context.Context, item model.Item, load loadSpec) erro
 		err = fmt.Errorf("chromecast refused to load the media (%s)", s.loadErr)
 	}
 	if err != nil {
-		s.st.State, s.st.Error = model.StateIdle, err.Error()
+		s.st.Error = err.Error()
+		if s.c == c { // a dropped connection already reports DISCONNECTED
+			s.st.State = model.StateIdle
+		}
 	}
 	return err
 }
