@@ -34,12 +34,16 @@ var (
 
 // handlers holds the dependencies of the route handlers.
 type handlers struct {
-	d Deps
+	d    Deps
+	subs *subs.Cache
 }
 
 // newMux registers the built-in routes, then the Extra routes.
 func newMux(d Deps) *http.ServeMux {
-	h := &handlers{d: d}
+	h := &handlers{d: d, subs: &subs.Cache{}}
+	if d.Config != nil {
+		h.subs.Dir = d.Config.SubDir
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/info", h.info)
 	mux.HandleFunc("GET /api/library", h.library)
@@ -53,6 +57,8 @@ func newMux(d Deps) *http.ServeMux {
 	mux.HandleFunc("GET /file/{id}", h.file)
 	mux.HandleFunc("GET /hls/{id}/{audio}/index.m3u8", h.playlist)
 	mux.HandleFunc("GET /hls/{id}/{audio}/{seg}", h.segment)
+	mux.HandleFunc("GET /hls/{id}/{audio}/copy/index.m3u8", h.copyPlaylist)
+	mux.HandleFunc("GET /hls/{id}/{audio}/copy/{seg}", h.copySegment)
 	mux.HandleFunc("GET /sub/{id}/{subfile}", h.subtitle)
 	if d.Extra != nil {
 		d.Extra(mux)
@@ -230,41 +236,77 @@ func validAudio(item model.Item, audio int) bool {
 	return audio < len(item.Info.Audio)
 }
 
-func (h *handlers) playlist(w http.ResponseWriter, r *http.Request) {
+// hlsItem returns the item and audio track an /hls/ request names.
+func (h *handlers) hlsItem(r *http.Request) (model.Item, int, bool) {
 	audio, ok := parseDigits(r.PathValue("audio"))
 	if !ok {
-		notFound(w)
-		return
+		return model.Item{}, 0, false
 	}
 	item, ok := h.lookup(r.PathValue("id"))
 	if !ok || item.Info == nil || !validAudio(item, audio) {
-		notFound(w)
-		return
+		return model.Item{}, 0, false
 	}
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-cache")
-	writeText(w, http.StatusOK, transcode.Playlist(item.Info.Duration))
+	return item, audio, true
 }
 
-func (h *handlers) segment(w http.ResponseWriter, r *http.Request) {
-	audio, ok := parseDigits(r.PathValue("audio"))
+func writePlaylist(w http.ResponseWriter, playlist string) {
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-cache")
+	writeText(w, http.StatusOK, playlist)
+}
+
+func (h *handlers) playlist(w http.ResponseWriter, r *http.Request) {
+	item, _, ok := h.hlsItem(r)
 	if !ok {
 		notFound(w)
 		return
 	}
+	writePlaylist(w, transcode.Playlist(item.Info.Duration))
+}
+
+func (h *handlers) copyPlaylist(w http.ResponseWriter, r *http.Request) {
+	item, _, ok := h.hlsItem(r)
+	if !ok {
+		notFound(w)
+		return
+	}
+	playlist, ok := h.d.TX.CopyPlaylist(r.Context(), item)
+	if !ok {
+		notFound(w)
+		return
+	}
+	writePlaylist(w, playlist)
+}
+
+func (h *handlers) segment(w http.ResponseWriter, r *http.Request) {
+	h.serveSegment(w, r, func(item model.Item, n int) bool { return n < transcode.SegmentCount(item.Info.Duration) }, h.d.TX.Segment)
+}
+
+func (h *handlers) copySegment(w http.ResponseWriter, r *http.Request) {
+	h.serveSegment(w, r, nil, h.d.TX.CopySegment)
+}
+
+// serveSegment answers a segment request with what produce returns. inRange,
+// when given, rejects segment numbers before produce is called.
+func (h *handlers) serveSegment(w http.ResponseWriter, r *http.Request, inRange func(model.Item, int) bool,
+	produce func(ctx context.Context, item model.Item, audio, n int) (string, error)) {
 	n, ok := transcode.ParseSegmentName(r.PathValue("seg"))
 	if !ok {
 		notFound(w)
 		return
 	}
-	item, ok := h.lookup(r.PathValue("id"))
-	if !ok || item.Info == nil || !validAudio(item, audio) || n >= transcode.SegmentCount(item.Info.Duration) {
+	item, audio, ok := h.hlsItem(r)
+	if !ok || (inRange != nil && !inRange(item, n)) {
 		notFound(w)
 		return
 	}
-	path, err := h.d.TX.Segment(r.Context(), item, audio, n)
+	path, err := produce(r.Context(), item, audio, n)
 	if r.Context().Err() != nil {
 		return // client went away; nothing to write
+	}
+	if errors.Is(err, transcode.ErrNoSegment) {
+		notFound(w)
+		return
 	}
 	if err != nil {
 		slog.Warn("segment failed", "item", item.Rel, "audio", audio, "seg", n, "err", err)
@@ -302,7 +344,7 @@ func (h *handlers) subtitle(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	vtt, err := subs.LoadVTT(item.Path, *track)
+	vtt, err := h.subs.Load(item.ID, item.Path, *track)
 	if err != nil {
 		slog.Error("subtitle conversion failed", "item", item.Rel, "sub", track.ID, "err", err)
 		writeText(w, http.StatusInternalServerError, "Subtitle conversion failed")

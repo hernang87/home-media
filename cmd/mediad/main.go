@@ -83,11 +83,13 @@ func run(logs *logbuf.Buffer) error {
 		return err
 	}
 	defer tx.StopAll()
+	tx.IndexDir = cfg.KeyDir
 
 	lan := config.LANAddress()
 	base := fmt.Sprintf("http://%s:%d", lan, cfg.Port)
 	caster := cast.NewManager(lib, base)
 	caster.StopHook = tx.StopItem
+	caster.CanCopy = tx.CanCopy
 	addr := &atomic.Pointer[[2]string]{} // lan, base; changes when the Mac moves networks
 	addr.Store(&[2]string{lan, base})
 	go watchLAN(ctx, cfg.Port, 30*time.Second, lan, config.LANAddress, func(lan, base string) {

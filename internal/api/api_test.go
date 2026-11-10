@@ -72,6 +72,18 @@ func (f *fakeTX) Segment(ctx context.Context, item model.Item, audio, n int) (st
 	return p, nil
 }
 
+// The copy stream of the fake has 2 segments, for item a only.
+func (f *fakeTX) CopyPlaylist(ctx context.Context, item model.Item) (string, bool) {
+	return "#EXTM3U\ncopy\n", item.ID == "a"
+}
+
+func (f *fakeTX) CopySegment(ctx context.Context, item model.Item, audio, n int) (string, error) {
+	if item.ID != "a" || n >= 2 {
+		return "", transcode.ErrNoSegment
+	}
+	return f.Segment(ctx, item, audio, n)
+}
+
 type fixture struct {
 	h   http.Handler
 	lib *fakeLib
@@ -351,6 +363,14 @@ func TestSegmentAndPlaylistRange(t *testing.T) {
 		{"playlist audio past end", "/hls/a/2/index.m3u8", 404, false},
 		{"playlist no audio tracks, audio 1", "/hls/c/1/index.m3u8", 404, false},
 		{"playlist valid audio", "/hls/a/1/index.m3u8", 200, false},
+		{"copy playlist", "/hls/a/1/copy/index.m3u8", 200, false},
+		{"copy playlist audio past end", "/hls/a/2/copy/index.m3u8", 404, false},
+		{"copy playlist, item without a copy stream", "/hls/c/0/copy/index.m3u8", 404, false},
+		{"copy segment", "/hls/a/0/copy/seg00001.ts", 200, true},
+		{"copy segment past end", "/hls/a/0/copy/seg00002.ts", 404, false},
+		{"copy segment audio past end", "/hls/a/2/copy/seg00000.ts", 404, false},
+		{"copy segment, item without a copy stream", "/hls/c/0/copy/seg00000.ts", 404, false},
+		{"copy segment bad name", "/hls/a/0/copy/nope.ts", 404, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

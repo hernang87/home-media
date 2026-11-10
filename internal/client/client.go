@@ -48,7 +48,7 @@ type PlayRequest struct {
 	Audio  int     `json:"audio"`
 	Sub    string  `json:"sub"`    // "" = no subtitles
 	Start  float64 `json:"start"`  // seconds; > 0 skips the resume question
-	Mode   string  `json:"mode"`   // auto | direct | transcode
+	Mode   string  `json:"mode"`   // auto | direct | remux | transcode
 	Resume string  `json:"resume"` // "" | continue | restart
 }
 

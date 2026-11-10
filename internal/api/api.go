@@ -23,6 +23,11 @@ type Library interface {
 // Transcoder is what the API needs from internal/transcode.
 type Transcoder interface {
 	Segment(ctx context.Context, item model.Item, audio, n int) (string, error)
+	// CopyPlaylist and CopySegment serve the stream that copies the file's
+	// video instead of re-encoding it. Items without one report false and
+	// transcode.ErrNoSegment.
+	CopyPlaylist(ctx context.Context, item model.Item) (string, bool)
+	CopySegment(ctx context.Context, item model.Item, audio, n int) (string, error)
 }
 
 // Info is returned by GET /api/info.

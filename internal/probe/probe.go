@@ -164,6 +164,17 @@ func CapsForModel(model string) DeviceCaps {
 	return DeviceCaps{HEVC: false, MaxHeight: 1080, VP9: false, MaxLevel: 42}
 }
 
+// CanCopyVideo reports whether a device can decode the file's video stream
+// as it is, so an HLS stream can carry it without re-encoding: 8-bit h264
+// within caps.
+func CanCopyVideo(info *model.MediaInfo, caps DeviceCaps) bool {
+	if info == nil || info.Video == nil {
+		return false
+	}
+	v := info.Video
+	return v.Codec == "h264" && v.PixFmt == "yuv420p" && v.Height <= caps.MaxHeight && v.Level > 0 && v.Level <= caps.MaxLevel
+}
+
 // CanDirectPlay reports whether file can be sent to a device as-is over HTTP
 // range requests: mp4/m4v/mov container, h264 yuv420p within caps, exactly one
 // AAC or MP3 audio track with <= 6 channels.

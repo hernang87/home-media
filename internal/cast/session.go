@@ -647,7 +647,7 @@ func (s *session) switchAudio(ctx context.Context, t controlTarget, req ControlR
 		return nil
 	}
 	st := s.status()
-	return s.m.Play(ctx, s.device().ID, PlayRequest{ItemID: t.itemID, Audio: int(v), Sub: st.Sub, Start: st.Position, Mode: "transcode", Resume: "restart"})
+	return s.m.Play(ctx, s.device().ID, PlayRequest{ItemID: t.itemID, Audio: int(v), Sub: st.Sub, Start: st.Position, Resume: "restart", noDirect: true})
 }
 
 // close ends the connection (used on shutdown).

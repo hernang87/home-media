@@ -71,7 +71,7 @@ func ctx(t *testing.T) context.Context {
 
 func TestBuildLoadDirectAndHLS(t *testing.T) {
 	m := NewManager(&fakeLib{}, "http://192.168.1.10:8200/")
-	direct, err := m.buildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "e0", Start: 12})
+	direct, err := m.buildLoad(context.Background(), testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "e0", Start: 12})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestBuildLoadDirectAndHLS(t *testing.T) {
 		t.Errorf("start = %v", direct.payload["currentTime"])
 	}
 
-	hls, err := m.buildLoad(testItem("a.mkv", h264, aac, aac), "Chromecast", PlayRequest{Audio: 1})
+	hls, err := m.buildLoad(context.Background(), testItem("a.mkv", h264, aac, aac), "Chromecast", PlayRequest{Audio: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +98,58 @@ func TestBuildLoadDirectAndHLS(t *testing.T) {
 	if media["contentId"] != "http://192.168.1.10:8200/hls/abc123/1/index.m3u8" || media["contentType"] != "application/x-mpegURL" || hls.mode != "transcode" {
 		t.Errorf("hls media = %v", media)
 	}
-	if _, err := m.buildLoad(testItem("a.mkv", h264, aac), "Chromecast", PlayRequest{Mode: "direct"}); err == nil {
+	if _, err := m.buildLoad(context.Background(), testItem("a.mkv", h264, aac), "Chromecast", PlayRequest{Mode: "direct"}); err == nil {
 		t.Error("forcing direct on an mkv must fail")
 	}
-	if _, err := m.buildLoad(testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "nope"}); err == nil {
+	if _, err := m.buildLoad(context.Background(), testItem("a.mp4", h264, aac), "Chromecast", PlayRequest{Sub: "nope"}); err == nil {
 		t.Error("unknown subtitle must fail")
+	}
+}
+
+func TestChooseStreamModes(t *testing.T) {
+	const base = "http://192.168.1.10:8200"
+	hevc := model.VideoInfo{Codec: "hevc", PixFmt: "yuv420p", Height: 1080}
+	uhd := model.VideoInfo{Codec: "h264", PixFmt: "yuv420p", Level: 51, Height: 2160}
+	tests := []struct {
+		name     string
+		item     model.Item
+		device   string
+		req      PlayRequest
+		copyable bool // what the transcoder answers
+		wantMode string
+		wantURL  string
+		wantErr  bool
+	}{
+		{name: "mp4 plays directly", item: testItem("a.mp4", h264, aac), copyable: true, wantMode: "direct", wantURL: base + "/file/abc123"},
+		{name: "mkv with h264 is remuxed", item: testItem("a.mkv", h264, aac), copyable: true, wantMode: "remux", wantURL: base + "/hls/abc123/0/copy/index.m3u8"},
+		{name: "remux keeps the audio track", item: testItem("a.mkv", h264, aac, aac), req: PlayRequest{Audio: 1}, copyable: true, wantMode: "remux", wantURL: base + "/hls/abc123/1/copy/index.m3u8"},
+		{name: "no keyframe index means transcode", item: testItem("a.mkv", h264, aac), wantMode: "transcode", wantURL: base + "/hls/abc123/0/index.m3u8"},
+		{name: "hevc is transcoded", item: testItem("a.mkv", hevc, aac), copyable: true, wantMode: "transcode", wantURL: base + "/hls/abc123/0/index.m3u8"},
+		{name: "4k h264 is transcoded for a 1080p device", item: testItem("a.mkv", uhd, aac), copyable: true, wantMode: "transcode", wantURL: base + "/hls/abc123/0/index.m3u8"},
+		{name: "4k h264 is remuxed for a 4k device", item: testItem("a.mkv", uhd, aac), device: "Chromecast Ultra", copyable: true, wantMode: "remux", wantURL: base + "/hls/abc123/0/copy/index.m3u8"},
+		{name: "transcode mode never copies", item: testItem("a.mkv", h264, aac), req: PlayRequest{Mode: "transcode"}, copyable: true, wantMode: "transcode", wantURL: base + "/hls/abc123/0/index.m3u8"},
+		{name: "remux mode skips direct play", item: testItem("a.mp4", h264, aac), req: PlayRequest{Mode: "remux"}, copyable: true, wantMode: "remux", wantURL: base + "/hls/abc123/0/copy/index.m3u8"},
+		{name: "remux mode fails when it cannot copy", item: testItem("a.mkv", hevc, aac), req: PlayRequest{Mode: "remux"}, copyable: true, wantErr: true},
+		{name: "an audio switch never plays directly", item: testItem("a.mp4", h264, aac), req: PlayRequest{noDirect: true}, copyable: true, wantMode: "remux", wantURL: base + "/hls/abc123/0/copy/index.m3u8"},
+		{name: "unknown audio track", item: testItem("a.mkv", h264, aac), req: PlayRequest{Audio: 3}, copyable: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewManager(&fakeLib{}, base)
+			m.CanCopy = func(context.Context, model.Item) bool { return tt.copyable }
+			st, err := m.chooseStream(context.Background(), base, tt.item, tt.device, tt.req)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if st.mode != tt.wantMode || st.url != tt.wantURL {
+				t.Errorf("got %s %s, want %s %s", st.mode, st.url, tt.wantMode, tt.wantURL)
+			}
+		})
+	}
+	// Without a transcoder hook nothing is ever remuxed.
+	m := NewManager(&fakeLib{}, base)
+	if st, _ := m.chooseStream(context.Background(), base, testItem("a.mkv", h264, aac), "", PlayRequest{}); st.mode != "transcode" {
+		t.Errorf("mode without CanCopy = %s, want transcode", st.mode)
 	}
 }
 

@@ -2,7 +2,7 @@
 
 A small media server for your home network. It scans a folder of movies and shows, plays them on a Chromecast, and is controlled from a phone page or a macOS desktop app.
 
-- **`mediad`**: the daemon. Scans `MEDIA_DIR`, serves files with direct play or on-demand HLS transcoding (ffmpeg), converts subtitles to WebVTT, and casts to Chromecast. The CASTv2 client is hand-rolled and uses the stock Default Media Receiver.
+- **`mediad`**: the daemon. Scans `MEDIA_DIR`, serves files with direct play or on-demand HLS (ffmpeg), re-encoding only what the TV cannot play, converts subtitles to WebVTT, and casts to Chromecast. The CASTv2 client is hand-rolled and uses the stock Default Media Receiver.
 - **`homemedia-app`**: a Fyne desktop client for macOS. It starts `mediad` when none is running.
 - **Phone page**: open `http://<your-mac>:8200/` on the same Wi-Fi to browse and cast. The app's Phone tab shows a QR code.
 

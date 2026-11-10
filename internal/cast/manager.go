@@ -42,6 +42,9 @@ const (
 	// directContentType is sent for direct play; only MP4-family files play directly
 	// (see probe.castVideoContainers).
 	directContentType = "video/mp4"
+	// copyWait is how long a play waits for the keyframe scan that a copy
+	// stream needs, before it falls back to re-encoding.
+	copyWait = 15 * time.Second
 )
 
 // Manager owns device discovery and one session per device.
@@ -50,6 +53,10 @@ type Manager struct {
 	// StopHook is called when playback of an item ends (finished or stopped) so
 	// transcoding can be stopped. May be nil.
 	StopHook func(itemID string)
+	// CanCopy reports whether an item can be streamed over HLS with its video
+	// copied instead of re-encoded (see transcode.Manager.CanCopy). It may
+	// block until ctx ends. Nil means never.
+	CanCopy func(ctx context.Context, item model.Item) bool
 
 	mu       sync.Mutex
 	base     string // http://<lan>:<port>, how the Chromecast reaches this server; guarded by mu
@@ -231,11 +238,16 @@ type PlayRequest struct {
 	Audio  int     `json:"audio"`
 	Sub    string  `json:"sub"`   // sub track id, "" = none
 	Start  float64 `json:"start"` // seconds; > 0 skips the resume question
-	Mode   string  `json:"mode"`  // auto | direct | transcode
+	// Mode is direct (the file as it is), remux (HLS with the file's video and
+	// re-encoded audio), transcode (HLS, everything re-encoded), or anything
+	// else for the first of those the device and file allow.
+	Mode string `json:"mode"`
 	// Resume answers the "continue or restart?" question for a partly watched
 	// item: "continue" starts at the saved position, "restart" at 0. Empty asks
 	// (a *ResumeError) when there is a saved position and Start is not given.
 	Resume string `json:"resume"`
+	// noDirect rules out direct play, which cannot pick an audio track.
+	noDirect bool
 }
 
 // ResumeError tells the caller the item was partly watched and needs a choice.
@@ -260,12 +272,12 @@ type loadSpec struct {
 }
 
 // buildLoad builds the LOAD message for item on a device model.
-func (m *Manager) buildLoad(item model.Item, deviceModel string, req PlayRequest) (loadSpec, error) {
+func (m *Manager) buildLoad(ctx context.Context, item model.Item, deviceModel string, req PlayRequest) (loadSpec, error) {
 	if item.Info == nil || item.Info.Video == nil {
 		return loadSpec{}, badRequest("item has no video")
 	}
 	base := m.baseURL()
-	st, err := chooseStream(base, item, deviceModel, req)
+	st, err := m.chooseStream(ctx, base, item, deviceModel, req)
 	if err != nil {
 		return loadSpec{}, err
 	}
@@ -287,20 +299,33 @@ func (m *Manager) buildLoad(item model.Item, deviceModel string, req PlayRequest
 // stream is where the receiver fetches the video from, and how.
 type stream struct {
 	url, contentType string
-	mode             string // direct | transcode
+	mode             string // direct | remux | transcode
 	audio            int
 }
 
-// chooseStream picks direct play or HLS for req.Mode ("direct", "transcode",
-// or anything else for whatever the device can play).
-func chooseStream(base string, item model.Item, deviceModel string, req PlayRequest) (stream, error) {
-	direct := probe.CanDirectPlay(item.Path, item.Info, probe.CapsForModel(deviceModel))
+// canCopy reports whether item can be remuxed for a device with caps. It
+// waits up to copyWait for the keyframe scan of a file played for the first time.
+func (m *Manager) canCopy(ctx context.Context, item model.Item, caps probe.DeviceCaps) bool {
+	if m.CanCopy == nil || !probe.CanCopyVideo(item.Info, caps) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, copyWait)
+	defer cancel()
+	return m.CanCopy(ctx, item)
+}
+
+// chooseStream picks how to play item for req.Mode: the cheapest of direct
+// play, remux and transcode that the device and the file allow, unless the
+// mode names one.
+func (m *Manager) chooseStream(ctx context.Context, base string, item model.Item, deviceModel string, req PlayRequest) (stream, error) {
+	caps := probe.CapsForModel(deviceModel)
+	direct := !req.noDirect && probe.CanDirectPlay(item.Path, item.Info, caps)
 	switch req.Mode {
 	case "direct":
 		if !direct {
 			return stream{}, badRequest("this file cannot be played directly on this device")
 		}
-	case "transcode":
+	case "remux", "transcode":
 		direct = false
 	}
 	if direct {
@@ -309,10 +334,19 @@ func chooseStream(base string, item model.Item, deviceModel string, req PlayRequ
 	if req.Audio < 0 || (len(item.Info.Audio) > 0 && req.Audio >= len(item.Info.Audio)) {
 		return stream{}, badRequest("audio track %d does not exist", req.Audio)
 	}
-	return stream{
+	st := stream{
 		url:         fmt.Sprintf("%s/hls/%s/%d/index.m3u8", base, item.ID, req.Audio),
 		contentType: "application/x-mpegURL", mode: "transcode", audio: req.Audio,
-	}, nil
+	}
+	if req.Mode == "transcode" {
+		return st, nil
+	}
+	if m.canCopy(ctx, item, caps) {
+		st.url, st.mode = fmt.Sprintf("%s/hls/%s/%d/copy/index.m3u8", base, item.ID, req.Audio), "remux"
+	} else if req.Mode == "remux" {
+		return stream{}, badRequest("this file's video cannot be sent to this device without re-encoding")
+	}
+	return st, nil
 }
 
 // subtitleTracks lists item's subtitles as Cast text tracks, maps each track
@@ -398,7 +432,7 @@ func (m *Manager) Play(ctx context.Context, deviceKey string, req PlayRequest) e
 			req.Start = float64(pr.Pos)
 		}
 	}
-	spec, err := m.buildLoad(item, dev.Model, req)
+	spec, err := m.buildLoad(ctx, item, dev.Model, req)
 	if err != nil {
 		return err
 	}

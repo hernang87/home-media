@@ -20,6 +20,8 @@ type Config struct {
 	TMDBLanguage string // TMDB_LANGUAGE, default "en-US"
 	DataDir      string // ./data next to the working dir; created
 	ArtDir       string // DataDir/art; created
+	SubDir       string // DataDir/subs; converted subtitles, created on first use
+	KeyDir       string // DataDir/keyframes; keyframe indexes for remuxing, created on first use
 	TmpDir       string // os.TempDir()/home-media-hls
 }
 
@@ -65,6 +67,8 @@ func Load(mediaArg string) (*Config, error) {
 		TMDBLanguage: orDefault(get("TMDB_LANGUAGE"), defaultLanguage),
 		DataDir:      dataDirName,
 		ArtDir:       filepath.Join(dataDirName, "art"),
+		SubDir:       filepath.Join(dataDirName, "subs"),
+		KeyDir:       filepath.Join(dataDirName, "keyframes"),
 		TmpDir:       filepath.Join(os.TempDir(), "home-media-hls"),
 	}
 	for _, dir := range []string{cfg.DataDir, cfg.ArtDir} {

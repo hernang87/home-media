@@ -18,7 +18,7 @@ Go media server (module `homemedia`). `mediad` serves a small phone control page
 - `internal/subs`: subtitle track names, conversion to WebVTT
 - `internal/metadata`: TMDB client and artwork cache
 - `internal/library`: folder scan, item cache, watch state, file watching
-- `internal/transcode`: on-demand HLS segments via ffmpeg
+- `internal/transcode`: on-demand HLS segments via ffmpeg, re-encoded or with the video copied (remux)
 - `internal/api`: HTTP API and media files (`GET /api/logs?after=<seq>` serves the log ring; `/api/settings` reads and writes settings)
 - `internal/logbuf`: in-memory slog ring buffer behind the app's Logs tab
 - `internal/web`: embedded phone page (plain HTML/JS in `static/`, no build step; rebuild `mediad` to pick up edits)
@@ -54,6 +54,10 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 
 - Resume protocol: `POST /api/cast/{device}/play` returns 409 with `{"code":"resume",...}` when saved progress is >= 30 s. The client retries with `"resume":"continue"` or `"resume":"restart"`.
 - Progress is saved every 10 s and on pause, stop and finish.
+- A play picks the cheapest of three modes: `direct` (the file as it is), `remux` (HLS that copies the file's H.264 video and re-encodes only the audio) and `transcode` (HLS, everything re-encoded). `"mode":"transcode"` in the play request forces a full re-encode; `"mode":"remux"` and `"mode":"direct"` fail with 400 when not possible.
+- Remux streams live under `/hls/{id}/{audio}/copy/` and have one segment per keyframe interval, because copied video can only be cut at keyframes. The keyframe times come from an ffprobe scan on the first play of a file (a few seconds, cached in `data/keyframes`); if the scan takes longer than 15 s that play is transcoded and the next one remuxes.
+- Remux was verified with ffprobe on real files, not on every TV. To check a file: `HOMEMEDIA_COPY_FILE=/path/movie.mkv go test -run TestCopyRealFile ./internal/transcode`.
+- Subtitles that need ffmpeg (embedded tracks, `.ass`/`.ssa` files) are converted once and cached in `data/subs`, keyed by the source file's size and mtime.
 - `Status` never connects. Control commands reconnect after a dropped connection and rejoin the running receiver app and media session (`session.rejoin`); only `Play` launches the app.
 - Without `TMDB_API_KEY`, posters are null and the app falls back to the backdrop.
 - Device names in URLs must be percent-encoded, or use the device ID.
