@@ -61,29 +61,34 @@ func runDoctor(w io.Writer) error {
 		return doctorResult(failed)
 	}
 
-	base := fmt.Sprintf("http://%s:%d", lan, cfg.Port)
+	doctorServer(line, fmt.Sprintf("http://%s:%d", lan, cfg.Port), cfg.Port)
+	return doctorResult(failed)
+}
+
+// doctorServer reports whether mediad answers at base and which Chromecasts
+// it sees. Nothing here is a failure: the server may simply not be running.
+func doctorServer(line func(tag, format string, args ...any), base string, port int) {
 	var info api.Info
 	if err := getJSON(base+"/api/info", &info); err != nil {
-		line("warn", "server not running on port %d", cfg.Port)
-		return doctorResult(failed)
+		line("warn", "server not running on port %d", port)
+		return
 	}
 	line("ok", "server is running as %s v%s", info.Name, info.Version)
 
 	var devices []cast.Device
 	if err := getJSON(base+"/api/cast/devices", &devices); err != nil {
 		line("warn", "could not list Chromecasts: %v", err)
-		return doctorResult(failed)
+		return
 	}
 	if len(devices) == 0 {
 		line("warn", "no Chromecasts found; check Local Network permission and that the TV is on the same Wi-Fi")
-	} else {
-		names := make([]string, 0, len(devices))
-		for _, d := range devices {
-			names = append(names, d.Name)
-		}
-		line("ok", "Chromecasts: %s", strings.Join(names, ", "))
+		return
 	}
-	return doctorResult(failed)
+	names := make([]string, 0, len(devices))
+	for _, d := range devices {
+		names = append(names, d.Name)
+	}
+	line("ok", "Chromecasts: %s", strings.Join(names, ", "))
 }
 
 func doctorResult(failed bool) error {
