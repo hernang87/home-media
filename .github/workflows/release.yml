@@ -1,0 +1,47 @@
+name: Release
+
+# Push a tag like v0.5.0 to build HomeMedia-0.5.0-arm64.zip and attach it to
+# the GitHub release of that tag (created if it does not exist yet).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest # Apple silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+      - name: Check the tag matches the version in the code
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          grep -q "^const version = \"$want\"$" cmd/mediad/main.go \
+            || { echo "cmd/mediad/main.go version is not $want"; exit 1; }
+          [ "$(grep -c "<string>$want</string>" scripts/package-app.sh)" -eq 2 ] \
+            || { echo "scripts/package-app.sh Info.plist versions are not $want"; exit 1; }
+      - name: go test
+        run: go test -race ./...
+      - name: Build the app
+        run: bash scripts/package-app.sh --release
+      - name: Zip
+        run: |
+          zip="HomeMedia-${GITHUB_REF_NAME#v}-arm64.zip"
+          # ditto keeps the bundle's signature and symlinks intact.
+          ditto -c -k --keepParent bin/HomeMedia.app "$zip"
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" --verify-tag --generate-notes
+          fi

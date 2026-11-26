@@ -290,6 +290,11 @@ func (l *Library) scanOnce(ctx context.Context, refresh bool) error {
 		l.enrich(ctx, refresh)
 	}
 	l.makeThumbnails()
+	// An empty result is more likely an unmounted drive than an empty
+	// library: keep the caches so the files come back without re-fetching.
+	if len(found) > 0 && ctx.Err() == nil {
+		l.pruneCaches()
+	}
 	l.saveSoon.Trigger()
 	return ctx.Err()
 }

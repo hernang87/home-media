@@ -75,75 +75,104 @@ func agentDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
+// agent installs and removes the launchd agent. Tests swap its fields.
+type agent struct {
+	home, exe, workDir string
+	domain             string                               // launchd domain, e.g. gui/501
+	launchctl          func(args ...string) ([]byte, error) // runs launchctl, returning its combined output
+}
+
+// newAgent describes the agent for this executable, started in the working directory.
+func newAgent() (*agent, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("locate executable: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return nil, fmt.Errorf("resolve executable: %w", err)
+	}
+	exe, err = filepath.Abs(exe)
+	if err != nil {
+		return nil, fmt.Errorf("absolute executable path: %w", err)
+	}
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("working directory: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("home directory: %w", err)
+	}
+	return &agent{home: home, exe: exe, workDir: workDir, domain: agentDomain(), launchctl: func(args ...string) ([]byte, error) {
+		return exec.Command("launchctl", args...).CombinedOutput()
+	}}, nil
+}
+
+func (a *agent) target() string { return a.domain + "/" + serviceLabel }
+func (a *agent) plistPath() string {
+	return plistPathIn(filepath.Join(a.home, "Library", "LaunchAgents"))
+}
+
 // runInstall writes the launch agent plist and (re)loads it with launchctl.
 // Run it from the repository root: mediad reads ./.env and writes ./data
 // relative to its working directory.
 func runInstall(w io.Writer) error {
-	exe, err := os.Executable()
+	a, err := newAgent()
 	if err != nil {
-		return fmt.Errorf("locate executable: %w", err)
+		return err
 	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return fmt.Errorf("resolve executable: %w", err)
-	}
-	exe, err = filepath.Abs(exe)
-	if err != nil {
-		return fmt.Errorf("absolute executable path: %w", err)
-	}
-	workDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("working directory: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(workDir, ".env")); err != nil {
-		fmt.Fprintf(w, "warn no .env in %s; mediad will rely on environment variables\n", workDir)
-	}
+	return a.install(w)
+}
 
-	home, err := os.UserHomeDir()
+// runUninstall unloads the launch agent and removes its plist if present.
+func runUninstall(w io.Writer) error {
+	a, err := newAgent()
 	if err != nil {
-		return fmt.Errorf("home directory: %w", err)
+		return err
 	}
-	logDir := filepath.Join(home, "Library", "Logs", "homemedia")
+	return a.uninstall(w)
+}
+
+func (a *agent) install(w io.Writer) error {
+	if _, err := os.Stat(filepath.Join(a.workDir, ".env")); err != nil {
+		fmt.Fprintf(w, "warn no .env in %s; mediad will rely on environment variables\n", a.workDir)
+	}
+	logDir := filepath.Join(a.home, "Library", "Logs", "homemedia")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return fmt.Errorf("create log dir: %w", err)
 	}
 	logPath := filepath.Join(logDir, "mediad.log")
 
-	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0o755); err != nil {
+	plistPath := a.plistPath()
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)
 	}
-	plistPath := plistPathIn(plistDir)
-	if err := os.WriteFile(plistPath, plistFor(exe, workDir, logPath), 0o644); err != nil {
+	if err := os.WriteFile(plistPath, plistFor(a.exe, a.workDir, logPath), 0o644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 
 	// Unloading a service that is not loaded fails; that is expected.
-	_ = exec.Command("launchctl", "bootout", agentDomain()+"/"+serviceLabel).Run()
-	if out, err := exec.Command("launchctl", "bootstrap", agentDomain(), plistPath).CombinedOutput(); err != nil {
+	_, _ = a.launchctl("bootout", a.target())
+	if out, err := a.launchctl("bootstrap", a.domain, plistPath); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	fmt.Fprintf(w, "ok   installed %s\n", serviceLabel)
-	fmt.Fprintf(w, "     executable: %s\n", exe)
-	fmt.Fprintf(w, "     working dir: %s\n", workDir)
+	fmt.Fprintf(w, "     executable: %s\n", a.exe)
+	fmt.Fprintf(w, "     working dir: %s\n", a.workDir)
 	fmt.Fprintf(w, "     plist: %s\n", plistPath)
 	fmt.Fprintf(w, "     logs: tail -f %s\n", logPath)
-	fmt.Fprintf(w, "     status: launchctl print %s/%s\n", agentDomain(), serviceLabel)
+	fmt.Fprintf(w, "     status: launchctl print %s\n", a.target())
 	fmt.Fprintf(w, "     uninstall: mediad uninstall\n")
 	return nil
 }
 
-// runUninstall unloads the launch agent and removes its plist if present.
-func runUninstall(w io.Writer) error {
+func (a *agent) uninstall(w io.Writer) error {
 	// Bootout fails when the agent is not loaded; that is not an error here.
-	_ = exec.Command("launchctl", "bootout", agentDomain()+"/"+serviceLabel).Run()
+	_, _ = a.launchctl("bootout", a.target())
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home directory: %w", err)
-	}
-	plistPath := plistPathIn(filepath.Join(home, "Library", "LaunchAgents"))
+	plistPath := a.plistPath()
 	switch err := os.Remove(plistPath); {
 	case err == nil:
 		fmt.Fprintf(w, "ok   removed %s\n", plistPath)

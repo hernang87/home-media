@@ -140,8 +140,11 @@ func TestKeyframeIndexIsCached(t *testing.T) {
 		t.Error("a failed scan must not allow copy")
 	}
 	fail.Store(false)
-	if !m.CanCopy(ctx, item) || !m.CanCopy(ctx, item) {
-		t.Fatal("want copy after a good scan")
+	// Twice: the second call must use the kept result.
+	for range 2 {
+		if !m.CanCopy(ctx, item) {
+			t.Fatal("want copy after a good scan")
+		}
 	}
 	if got := scans.Load(); got != 2 {
 		t.Errorf("scans = %d, want 2 (the failure is retried, the result is kept)", got)
@@ -165,7 +168,12 @@ func TestKeyframeIndexIsCached(t *testing.T) {
 	// 20 s with one keyframe: unusable, and remembered as such.
 	sparse := h264Item("c", "c.mkv")
 	sparse.Info.Duration = 100
-	if m.CanCopy(ctx, sparse) || m.CanCopy(ctx, sparse) || scans.Load() != 4 {
+	for range 2 {
+		if m.CanCopy(ctx, sparse) {
+			t.Error("an unusable index must not allow copy")
+		}
+	}
+	if scans.Load() != 4 {
 		t.Errorf("an unusable index must be remembered; scans = %d", scans.Load())
 	}
 	if _, ok := m.CopyPlaylist(ctx, sparse); ok {

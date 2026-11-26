@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -70,6 +71,17 @@ func run(logs *logbuf.Buffer) error {
 	defer stop()
 	watchParent(ctx, stop) // exit with the desktop app that started us
 
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", cfg.Port))
+	if err != nil {
+		return err
+	}
+	return serve(ctx, cfg, logs, ln, true)
+}
+
+// serve runs the daemon on ln until ctx ends, then shuts down and saves the
+// library. lanServices turns on what reaches beyond this machine: mDNS
+// advertising, Chromecast discovery and keeping the Mac awake. Tests leave it off.
+func serve(ctx context.Context, cfg *config.Config, logs *logbuf.Buffer, ln net.Listener, lanServices bool) error {
 	meta := &metadata.Client{APIKey: cfg.TMDBAPIKey, Language: cfg.TMDBLanguage}
 	lib := library.New(cfg, meta)
 	settings := &settingsStore{
@@ -107,20 +119,22 @@ func run(logs *logbuf.Buffer) error {
 		Logs:     logs,
 		Settings: settings,
 	})
-	srv := &http.Server{Addr: fmt.Sprintf("0.0.0.0:%d", cfg.Port), Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
 	slog.Info("serving", "name", cfg.ServerName, "media", cfg.MediaDir, "url", base)
 	if !meta.Enabled() {
 		slog.Info("no TMDB_API_KEY set: using video frames as artwork (see .env.example)")
 	}
 
-	keepAwake(ctx)
-	go caster.Run(ctx)
-	go func() {
-		if err := discovery.Advertise(ctx, cfg.ServerName, cfg.Port); err != nil {
-			slog.Warn("mDNS advertise failed", "err", err)
-		}
-	}()
+	if lanServices {
+		keepAwake(ctx)
+		go caster.Run(ctx)
+		go func() {
+			if err := discovery.Advertise(ctx, cfg.ServerName, cfg.Port); err != nil {
+				slog.Warn("mDNS advertise failed", "err", err)
+			}
+		}()
+	}
 	go func() {
 		if err := lib.Scan(ctx, false); err != nil && ctx.Err() == nil {
 			slog.Error("scan failed", "err", err)
@@ -135,7 +149,7 @@ func run(logs *logbuf.Buffer) error {
 	}()
 
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
+	go func() { errc <- srv.Serve(ln) }()
 	select {
 	case err := <-errc:
 		return err

@@ -71,4 +71,6 @@ bin/mediad    # run from repo root: reads ./.env, writes ./data
 - TMDB client credentials change at runtime. Use `SetCredentials` and `Credentials`; never assign `APIKey` or `Language` after construction.
 - `homemedia-app` has a menu bar item (Open HomeMedia, Quit). The window close button only hides the window; Quit (or Cmd-Q) exits and stops an app-owned `mediad`.
 - The mDNS round-trip test needs a real LAN and is behind a build tag: `go test -tags mdns ./internal/discovery`. CI runs the fake-feed tests only.
+- After each scan, files in `data/art`, `data/subs` and `data/keyframes` whose key (the name before the first `.`) is not a current item ID or `show-<key>` are deleted. A scan that finds no videos (an unmounted drive, say) leaves them alone.
+- Release: set the version in `cmd/mediad/main.go` and in both Info.plist strings in `scripts/package-app.sh`, commit, then push tag `vX.Y.Z`. `.github/workflows/release.yml` builds `HomeMedia-X.Y.Z-arm64.zip` and attaches it to the release. It fails if the tag and the code disagree.
 - Never commit `.env`, `data/` or `bin/`.
