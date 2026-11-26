@@ -25,7 +25,7 @@ import (
 	"homemedia/internal/web"
 )
 
-const version = "0.4.0"
+const version = "0.4.1"
 
 func main() {
 	logs := logbuf.New(2000)
