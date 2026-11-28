@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -39,10 +40,14 @@ func main() {
 	switch cmd {
 	case "doctor":
 		err = runDoctor(os.Stdout)
-	case "install":
-		err = runInstall(os.Stdout)
-	case "uninstall":
-		err = runUninstall(os.Stdout)
+	case "install", "uninstall":
+		if runtime.GOOS != "darwin" {
+			err = fmt.Errorf("%s manages a launchd agent and works only on macOS; use your init system (systemd, say) elsewhere", cmd)
+		} else if cmd == "install" {
+			err = runInstall(os.Stdout)
+		} else {
+			err = runUninstall(os.Stdout)
+		}
 	default: // anything else is the media dir
 		err = run(logs)
 	}

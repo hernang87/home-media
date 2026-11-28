@@ -22,6 +22,17 @@ A small media server for your home network. It scans a folder of movies and show
 
 The app keeps its settings and cache in `~/Library/Application Support/HomeMedia` and logs to `~/Library/Logs/homemedia/mediad.log`.
 
+## Download (Linux, `mediad` only)
+
+The Linux build is the headless daemon, for a home server or a NAS. Control it from the phone page. There is no desktop app for Linux.
+
+1. Install ffmpeg (`sudo apt install ffmpeg`, or your distro's package).
+2. Download `mediad-<version>-linux-amd64.tar.gz` (or `-arm64` for a Raspberry Pi 4/5) from the [Releases](https://github.com/hernang87/home-media/releases) page and unpack it.
+3. In the unpacked folder, `cp .env.example .env` and set `MEDIA_DIR`.
+4. Run `./mediad doctor`, then `./mediad`. It reads `./.env` and writes `./data` in the folder you start it from.
+
+`install` / `uninstall` are macOS-only. To start `mediad` at boot, use a systemd unit with `WorkingDirectory` set to that folder. Linux has no hardware encoder support, so full transcodes use the CPU (libx264). Direct play and remux are not affected.
+
 ## Build and run
 
 ```sh

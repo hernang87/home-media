@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag like v0.5.0 to build HomeMedia-0.5.0-arm64.zip and attach it to
+# Push a tag like v0.5.0 to build HomeMedia-0.5.0-arm64.zip (macOS app) and
+# mediad-0.5.0-linux-{amd64,arm64}.tar.gz (headless daemon) and attach them to
 # the GitHub release of that tag (created if it does not exist yet).
 on:
   push:
@@ -45,3 +46,33 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" "$ZIP" --verify-tag --generate-notes
           fi
+
+  linux:
+    # After the macOS job, which creates the release; two jobs creating it at
+    # once would race.
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: go test (all but the Fyne desktop app)
+        run: go test -race $(go list ./... | grep -v -e /internal/ui$ -e /cmd/homemedia-app$)
+      - name: Build and pack mediad
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for arch in amd64 arm64; do
+            dir="mediad-$v-linux-$arch"
+            mkdir "$dir"
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "$dir/mediad" ./cmd/mediad
+            cp README.md LICENSE "$dir/"
+            cp .env.example "$dir/"
+            tar -czf "$dir.tar.gz" "$dir"
+          done
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" mediad-*-linux-*.tar.gz --clobber

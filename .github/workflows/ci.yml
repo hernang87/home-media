@@ -22,3 +22,20 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
       - name: go test
         run: go test -race ./...
+
+  linux:
+    # mediad ships for Linux too; the Fyne desktop app does not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: go vet (all but the Fyne desktop app)
+        run: go vet $(go list ./... | grep -v -e /internal/ui$ -e /cmd/homemedia-app$)
+      - name: go test (all but the Fyne desktop app)
+        run: go test -race $(go list ./... | grep -v -e /internal/ui$ -e /cmd/homemedia-app$)
+      - name: Build mediad for arm64
+        run: CGO_ENABLED=0 GOARCH=arm64 go build -o /dev/null ./cmd/mediad
